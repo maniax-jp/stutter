@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target")
 
+option(STUTTER_COPY_PLUGIN "Copy built plugin formats to ~/Library after build" ON)
+
 include(FetchContent)
 
 FetchContent_Declare(
@@ -24,7 +26,7 @@ juce_add_plugin(Stutter
     PLUGIN_CODE Stt1
     FORMATS VST3 AU Standalone
     PRODUCT_NAME "Stutter"
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${STUTTER_COPY_PLUGIN}
     VST3_CATEGORIES Fx
     AU_MAIN_TYPE kAudioUnitType_Effect
     IS_SYNTH FALSE
