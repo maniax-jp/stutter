@@ -37,6 +37,8 @@ StutterAudioProcessor::StutterAudioProcessor()
     sequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect> (apvts, laneGate));
     sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect> (apvts, laneFilter));
     sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect> (apvts, laneCrush));
+
+    presetManager = std::make_unique<stutter::PresetManager> (*this);
 }
 
 StutterAudioProcessor::~StutterAudioProcessor() = default;

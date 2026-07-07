@@ -50,6 +50,18 @@ void BottomTabs::setSelectedLane (int laneIndex)
     repaint();
 }
 
+void BottomTabs::refreshAfterPresetLoad()
+{
+    // Re-sync the lane panel title/knobs are already handled by attachments; just repaint
+    // everything (including hidden tabs, cheaply, since JUCE skips painting invisible components
+    // anyway) so that whichever curve/lane view the user is looking at picks up the new state.
+    laneParamPanel.repaint();
+    volumeCurveEditor.repaint();
+    filterCurveEditor.repaint();
+    panCurveEditor.repaint();
+    repaint();
+}
+
 void BottomTabs::selectTab (Tab t)
 {
     currentTab = t;

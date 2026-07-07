@@ -22,6 +22,16 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     stepGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
     bottomTabs.setSelectedLane (stepGrid.getSelectedLane());
 
+    // Structural preset data (step grid + curve breakpoints) isn't APVTS-parameter-bound, so it
+    // doesn't auto-refresh via attachment listeners the way sliders/combo boxes do -- force a
+    // repaint of everything that reads it directly whenever a preset finishes loading.
+    processorRef.getPresetManager().onPresetLoaded = [this]
+    {
+        headerBar.refreshPresetLabel();
+        stepGrid.repaint();
+        bottomTabs.refreshAfterPresetLoad();
+    };
+
     setResizable (true, true);
     setResizeLimits (defaultWidth / 2, defaultHeight / 2, defaultWidth * 2, defaultHeight * 2);
     getConstrainer()->setFixedAspectRatio ((double) defaultWidth / (double) defaultHeight);

@@ -91,6 +91,7 @@ void StepGrid::mouseDown (const juce::MouseEvent& e)
         isDragPainting = true;
         dragLane = hit.lane;
         proc.getSequencer().setStep (hit.lane, hit.step, dragPaintValue);
+        proc.getPresetManager().markDirty();
         repaint();
     }
 }
@@ -104,6 +105,7 @@ void StepGrid::mouseDrag (const juce::MouseEvent& e)
     if (hit.onCell && hit.lane == dragLane)
     {
         proc.getSequencer().setStep (hit.lane, hit.step, dragPaintValue);
+        proc.getPresetManager().markDirty();
         repaint();
     }
 }

@@ -25,7 +25,7 @@ public:
     void resized() override;
 
 private:
-    [[maybe_unused]] StutterAudioProcessor& processorRef;
+    StutterAudioProcessor& processorRef;
 
     stutter::ui::StutterLookAndFeel lookAndFeel;
 

@@ -7,6 +7,7 @@
 #include "dsp/StepSequencer.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/ParameterIDs.h"
+#include "PresetManager.h"
 
 namespace stutter
 {
@@ -56,6 +57,8 @@ public:
         return curves[(size_t) target];
     }
 
+    stutter::PresetManager& getPresetManager() noexcept { return *presetManager; }
+
     /** Current internal free-running clock BPM (used when host transport is stopped/not available). */
     double getInternalBpm() const noexcept { return internalBpm.load (std::memory_order_relaxed); }
     void setInternalBpm (double bpm) noexcept { internalBpm.store (bpm, std::memory_order_relaxed); }
@@ -87,6 +90,10 @@ private:
     stutter::CaptureBuffer captureBuffer;
     stutter::StepSequencer sequencer;
     std::array<stutter::CurveModulator, (size_t) stutter::ModTarget::Count> curves;
+
+    // Constructed last (after apvts/sequencer/curves exist) since it reads them when building
+    // factory preset states; declared last so member destruction order doesn't matter either way.
+    std::unique_ptr<stutter::PresetManager> presetManager;
 
     // Smoothed globals (audio-rate, click-free)
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> dryWetSmoothed;

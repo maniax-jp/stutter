@@ -23,6 +23,7 @@ CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget t
     enableButton.onClick = [this]
     {
         curve().setEnabled (enableButton.getToggleState());
+        proc.getPresetManager().markDirty();
         repaint();
     };
     addAndMakeVisible (enableButton);
@@ -34,6 +35,7 @@ CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget t
         btn->onClick = [this, name]
         {
             curve().applyPreset (name);
+            proc.getPresetManager().markDirty();
             repaint();
         };
         addAndMakeVisible (*btn);
@@ -110,6 +112,7 @@ int CurveEditor::findSegmentIndex (float screenX, juce::Rectangle<float> plot) c
 void CurveEditor::pushPoints (std::vector<stutter::CurvePoint> pts)
 {
     curve().setPoints (std::move (pts));
+    proc.getPresetManager().markDirty();
     repaint();
 }
 

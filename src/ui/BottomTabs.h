@@ -17,6 +17,11 @@ public:
 
     void setSelectedLane (int laneIndex);
 
+    /** Forces all child views (lane knobs / curve editors) to repaint immediately -- used after
+        a preset load, since curve breakpoints and step-grid data aren't APVTS parameters and so
+        don't auto-refresh via attachment listeners the way sliders/combo boxes do. */
+    void refreshAfterPresetLoad();
+
     void paint (juce::Graphics&) override;
     void resized() override;
 

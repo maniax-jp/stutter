@@ -1,5 +1,6 @@
 #include "HeaderBar.h"
 #include "../PluginProcessor.h"
+#include "../PresetManager.h"
 #include "../dsp/ParameterIDs.h"
 
 namespace stutter::ui
@@ -30,18 +31,20 @@ HeaderBar::HeaderBar (StutterAudioProcessor& processor) : proc (processor)
     subtitleLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (subtitleLabel);
 
-    // ---- Preset browser placeholder (phase 3 wires real preset switching) ----
+    // ---- Preset browser ----
     addAndMakeVisible (presetArea);
+    presetPrevButton.onClick = [this] { proc.getPresetManager().loadPrevious(); };
+    presetNextButton.onClick = [this] { proc.getPresetManager().loadNext(); };
     for (auto* b : { &presetPrevButton, &presetNextButton })
-    {
-        b->setEnabled (false);
         addAndMakeVisible (*b);
-    }
-    presetNameButton.setEnabled (false);
-    presetNameButton.setButtonText ("Init Patch");
+
+    presetNameButton.onClick = [this] { showPresetMenu(); };
     addAndMakeVisible (presetNameButton);
-    presetSaveButton.setEnabled (false);
+
+    presetSaveButton.onClick = [this] { showSaveDialog(); };
     addAndMakeVisible (presetSaveButton);
+
+    refreshPresetLabel();
 
     // ---- Dry/Wet knob ----
     dryWetKnob.setColour (juce::Slider::rotarySliderFillColourId, Palette::accent);
@@ -92,6 +95,82 @@ void HeaderBar::timerCallback()
         bpmLabel.setText (text, juce::dontSendNotification);
         bpmLabel.setColour (juce::Label::textColourId, synced ? Palette::accent.withAlpha (0.9f) : Palette::textLo);
     }
+
+    // Cheap poll for the dirty flag (set by StepGrid/CurveEditor/parameter edits) so the "*"
+    // modified-indicator appears promptly without needing every edit site to reach into HeaderBar.
+    const bool dirtyNow = proc.getPresetManager().isDirty();
+    if (dirtyNow != lastShownDirty)
+    {
+        lastShownDirty = dirtyNow;
+        refreshPresetLabel();
+    }
+}
+
+void HeaderBar::refreshPresetLabel()
+{
+    auto& pm = proc.getPresetManager();
+    juce::String text = pm.getCurrentPresetName();
+    if (pm.isDirty())
+        text << " *";
+    presetNameButton.setButtonText (text);
+    lastShownDirty = pm.isDirty();
+}
+
+void HeaderBar::showPresetMenu()
+{
+    auto& pm = proc.getPresetManager();
+    const auto& presets = pm.getPresets();
+
+    juce::PopupMenu menu;
+    juce::String currentCategory;
+    int itemId = 1; // PopupMenu item IDs must be non-zero
+    std::vector<int> idToIndex; // idToIndex[itemId - 1] = preset index
+    idToIndex.reserve (presets.size());
+
+    for (int i = 0; i < (int) presets.size(); ++i)
+    {
+        const auto& entry = presets[(size_t) i];
+        if (entry.category != currentCategory)
+        {
+            currentCategory = entry.category;
+            menu.addSectionHeader (currentCategory);
+        }
+
+        menu.addItem (itemId, entry.name, true, i == pm.getCurrentIndex());
+        idToIndex.push_back (i);
+        ++itemId;
+    }
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton),
+        [this, idToIndex] (int result)
+        {
+            if (result <= 0)
+                return;
+            const size_t idx = (size_t) (result - 1);
+            if (idx < idToIndex.size())
+                proc.getPresetManager().loadPreset (idToIndex[idx]);
+        });
+}
+
+void HeaderBar::showSaveDialog()
+{
+    saveDialog = std::make_unique<juce::AlertWindow> ("Save Preset",
+        "Enter a name for the user preset:", juce::MessageBoxIconType::NoIcon);
+    saveDialog->addTextEditor ("name", proc.getPresetManager().getCurrentPresetName(), "Name:");
+    saveDialog->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    saveDialog->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    saveDialog->enterModalState (true, juce::ModalCallbackFunction::create (
+        [this] (int result)
+        {
+            if (result == 1 && saveDialog != nullptr)
+            {
+                const auto name = saveDialog->getTextEditorContents ("name");
+                proc.getPresetManager().saveUserPreset (name);
+                refreshPresetLabel();
+            }
+            saveDialog.reset();
+        }));
 }
 
 void HeaderBar::paint (juce::Graphics& g)
