@@ -36,9 +36,9 @@ public:
     {
         juce::ignoreUnused (capture);
 
-        const float rateParam = getParam ("rate", 4.0f);   // divisions index, see rateToFraction
-        const float decayParam = getParam ("decay", 0.0f); // 0..1: how much loop shrinks per repeat
-        pitchSlideSemis = getParam ("pitchSlide", 0.0f);
+        const float rateParam = getParam (ID::stutterRate, 4.0f);   // divisions index, see rateToFraction
+        const float decayParam = getParam (ID::stutterDecay, 0.0f); // 0..1: how much loop shrinks per repeat
+        pitchSlideSemis = getParam (ID::stutterPitchSlide, 0.0f);
 
         const double fraction = rateToFraction ((int) rateParam);
         baseLoopLenSamples = juce::jmax (32.0, stepLengthSamples * fraction * 4.0); // stepLength = 1/16, scale to musical fraction of a bar

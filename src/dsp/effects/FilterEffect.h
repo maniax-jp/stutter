@@ -56,13 +56,17 @@ public:
             ? std::sin (juce::MathConstants<float>::twoPi * (float) std::fmod (lfoPhase * lfoCyclesPerStep, 1.0))
             : 0.0f;
 
-        // Map cutoff (with LFO modulation) into normalized SVF coefficient
+        // Map cutoff (with LFO modulation) into normalized SVF coefficient. Clamp strictly below
+        // sampleRate * 0.4 (rather than 0.45) to keep the "2*sin(pi*f/sr)" coefficient well away
+        // from the point where the SVF becomes unstable/self-oscillating at high resonance.
         const float modOctaves = lfoValue * lfoDepth * 3.0f; // +/-3 octaves sweep at full depth
-        const float modulatedCutoff = juce::jlimit (20.0f, (float) sampleRate * 0.45f,
+        const float modulatedCutoff = juce::jlimit (20.0f, (float) sampleRate * 0.4f,
                                                       cutoffHz * std::pow (2.0f, modOctaves));
 
         const float f = 2.0f * std::sin (juce::MathConstants<float>::pi * modulatedCutoff / (float) sampleRate);
-        const float q = 1.0f - resonance;
+        // q = 1 - resonance would reach 0 at resonance=1.0 (undamped -> runaway feedback).
+        // Clamp resonance to 0.95 equivalent so q never drops below a small positive floor.
+        const float q = 1.0f - juce::jmin (resonance, 0.95f);
 
         for (int c = 0; c < numCh && c < maxChannels; ++c)
         {
@@ -85,8 +89,11 @@ public:
         }
 
         lfoPhase += 1.0 / stepLenSamplesD;
+        // Phase advances by a small fixed increment per sample, so it can only ever exceed 1.0
+        // by less than one increment: a plain subtract is exact and avoids fmod's per-sample
+        // division cost (and, for edge-case negative/NaN inputs, its less predictable behaviour).
         if (lfoPhase >= 1.0)
-            lfoPhase = std::fmod (lfoPhase, 1.0);
+            lfoPhase -= 1.0;
     }
 
 private:

@@ -11,6 +11,11 @@ namespace stutter
     (often looking slightly into the past). Holds at least 2 seconds of stereo audio.
 
     Real-time safe: no allocation happens after prepare().
+
+    Note: both write() and the read*() methods are called from the audio thread only in this
+    plugin's current design (there is no separate writer/reader thread split); the
+    release/acquire ordering on writePos below is kept anyway for documentation clarity and as
+    a safety margin should that assumption ever change.
 */
 class CaptureBuffer
 {
@@ -64,12 +69,16 @@ public:
         }
 
         pos = (pos + numSamples) % lengthSamples;
-        writePos.store (pos, std::memory_order_relaxed);
+        // Release: publishes the ring-buffer writes above so that any thread doing an acquire
+        // load of writePos is guaranteed to see the sample data that was just written. On
+        // weakly-ordered architectures (e.g. Apple Silicon/ARM) relaxed would not provide this
+        // guarantee; the cost of release/acquire here is negligible.
+        writePos.store (pos, std::memory_order_release);
         totalWritten.fetch_add (numSamples, std::memory_order_relaxed);
     }
 
     /** Current write head position (samples into the ring). */
-    int getWritePosition() const noexcept { return writePos.load (std::memory_order_relaxed); }
+    int getWritePosition() const noexcept { return writePos.load (std::memory_order_acquire); }
 
     /** Total number of samples ever written (monotonic, not wrapped). */
     juce::int64 getTotalWritten() const noexcept { return totalWritten.load (std::memory_order_relaxed); }
@@ -88,10 +97,10 @@ public:
         if (lengthSamples <= 0)
             return 0.0f;
 
-        channel = juce::jmin (channel, numCh - 1);
+        channel = juce::jlimit (0, numCh - 1, channel);
         samplesAgo = juce::jlimit (0.0, (double) (lengthSamples - 2), samplesAgo);
 
-        const double posD = (double) writePos.load (std::memory_order_relaxed) - samplesAgo;
+        const double posD = (double) writePos.load (std::memory_order_acquire) - samplesAgo;
         double wrapped = std::fmod (posD, (double) lengthSamples);
         if (wrapped < 0)
             wrapped += (double) lengthSamples;
@@ -109,9 +118,9 @@ public:
     {
         if (lengthSamples <= 0)
             return 0.0f;
-        channel = juce::jmin (channel, numCh - 1);
+        channel = juce::jlimit (0, numCh - 1, channel);
         samplesAgo = juce::jlimit (0, lengthSamples - 1, samplesAgo);
-        int idx = writePos.load (std::memory_order_relaxed) - samplesAgo;
+        int idx = writePos.load (std::memory_order_acquire) - samplesAgo;
         idx %= lengthSamples;
         if (idx < 0)
             idx += lengthSamples;

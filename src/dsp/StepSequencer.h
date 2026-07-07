@@ -2,6 +2,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_data_structures/juce_data_structures.h>
 #include <array>
+#include <cmath>
 #include <memory>
 #include "CaptureBuffer.h"
 #include "LaneEffect.h"
@@ -178,8 +179,14 @@ public:
             if (patternPos < 0)
                 patternPos += patternLengthPpq;
 
-            const int stepIndex = juce::jlimit (0, numSteps - 1, (int) (patternPos / stepLengthPpq));
-            const double stepPhase = (patternPos - stepIndex * stepLengthPpq) / stepLengthPpq; // 0..1 within step
+            // Add a tiny epsilon before the integer step-division: without it, floating-point
+            // rounding can put patternPos a hair below an exact step boundary (e.g. representing
+            // "step 15" as 14.999999999996), which truncates to the *previous* step and causes
+            // a one-sample flicker back and forth across the boundary (e.g. 15 <-> 0 jitter).
+            constexpr double stepEpsilon = 1.0e-9;
+            const int stepIndex = juce::jlimit (0, numSteps - 1, (int) (patternPos / stepLengthPpq + stepEpsilon));
+            const double stepPhase = juce::jlimit (0.0, 1.0,
+                (patternPos - stepIndex * stepLengthPpq) / stepLengthPpq); // 0..1 within step
             const double ppqPerStep = stepLengthPpq;
             const int stepLenSamplesEstimate = ppqPerSample > 0.0
                 ? (int) std::round (ppqPerStep / ppqPerSample)
@@ -236,11 +243,16 @@ public:
 
                     effect->processSample (capture, wet, chCount, stepPhase);
 
+                    // Equal-power crossfade curve (rather than linear) so that a hand-off between
+                    // two buffer lanes (one fading out while another fades in on the same sample
+                    // range) sums closer to unity power throughout the transition instead of
+                    // dipping in the middle -- avoids an audible gap/dulling on lane hand-off.
+                    const float eqPowerGain = std::sin (st.gain * juce::MathConstants<float>::halfPi);
                     for (int c = 0; c < chCount; ++c)
-                        working[c] = working[c] + st.gain * (wet[c] - working[c]);
+                        working[c] = working[c] + eqPowerGain * (wet[c] - working[c]);
                 }
 
-                advanceFade (st);
+                advanceFade (st, effect);
             }
 
             // --- Texture lanes (additive), each with its own crossfade in/out ---
@@ -266,7 +278,7 @@ public:
                         working[c] = working[c] + st.gain * (wet[c] - working[c]);
                 }
 
-                advanceFade (st);
+                advanceFade (st, effect);
             }
 
             for (int c = 0; c < chCount; ++c)
@@ -308,7 +320,7 @@ private:
         }
     }
 
-    void advanceFade (LaneRuntimeState& st)
+    void advanceFade (LaneRuntimeState& st, LaneEffect* effect)
     {
         if (st.fadeDirection > 0)
         {
@@ -330,6 +342,11 @@ private:
                 {
                     st.active = false;
                     st.currentStep = -1;
+                    // Fade-out has fully completed (active -> inactive transition): let the
+                    // effect know its step region has ended so it can reset any state that
+                    // depends on onStepEnd (mirrors onStepStart's lifecycle contract).
+                    if (effect != nullptr)
+                        effect->onStepEnd();
                 }
             }
         }

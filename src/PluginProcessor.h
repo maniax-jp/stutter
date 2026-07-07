@@ -93,10 +93,17 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGainSmoothed;
 
     // Global modulator state
-    double modulatorPhase = 0.0; // 0..1, advances per-sample based on sync division & tempo
     juce::dsp::StateVariableTPTFilter<float> globalFilter;
+    // Cutoff is smoothed and only pushed into globalFilter once per control-rate block
+    // (see filterCutoffUpdateInterval in .cpp) rather than every sample: calling
+    // setCutoffFrequency() per-sample recomputes internal filter coefficients on every
+    // sample, which is both a CPU hit and a source of zipper noise on fast LFO sweeps.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> filterCutoffSmoothed;
+    int filterCutoffUpdateCounter = 0;
 
     juce::AudioBuffer<float> dryScratchBuffer;
+    int dryScratchMaxChannels = 2;
+    int dryScratchMaxSamples = 0;
 
     double currentSampleRate = 44100.0;
 

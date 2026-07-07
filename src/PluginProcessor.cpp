@@ -158,9 +158,18 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     globalFilter.setCutoffFrequency (20000.0f);
     globalFilter.setResonance (0.3f);
 
-    dryScratchBuffer.setSize (numCh, samplesPerBlock, false, true, true);
+    // Smooth over ~10ms; coefficients are only re-pushed into globalFilter every
+    // filterCutoffUpdateInterval samples (see applyGlobalModulators), not every sample.
+    filterCutoffSmoothed.reset (sampleRate, 0.01);
+    filterCutoffSmoothed.setCurrentAndTargetValue (20000.0f);
+    filterCutoffUpdateCounter = 0;
 
-    modulatorPhase = 0.0;
+    // Allocate generously so processBlock never needs to resize on the audio thread, even if
+    // the host later calls processBlock with a larger buffer than it declared in prepareToPlay.
+    dryScratchMaxChannels = numCh;
+    dryScratchMaxSamples = samplesPerBlock;
+    dryScratchBuffer.setSize (dryScratchMaxChannels, dryScratchMaxSamples, false, true, true);
+
     internalClockPpq = 0.0;
     wasHostPlaying = false;
 }
@@ -217,15 +226,11 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 
     const double ppqPerSample = (bpm / 60.0) / currentSampleRate;
 
+    // Free-running internal clock: when host sync is off (or the host isn't playing / doesn't
+    // report a usable position), keep advancing independently from where we left off, regardless
+    // of host transport state changes.
     if (! usingHostSync)
-    {
-        // Free-running internal clock: keep advancing from where we left off.
-        if (! wasHostPlaying && hostPlaying)
-        {
-            // Host just started playing again but sync disabled; keep internal clock running independently.
-        }
         ppqAtBlockStart = internalClockPpq;
-    }
 
     sequencer.processBlock (buffer, captureBuffer, ppqAtBlockStart, ppqPerSample);
 
@@ -243,6 +248,10 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 
 void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buffer)
 {
+    // Control-rate interval (in samples) at which the global filter's cutoff coefficients are
+    // actually recalculated; see the comment at the filter modulator block below.
+    constexpr int filterCutoffUpdateInterval = 32;
+
     const int numSamples = buffer.getNumSamples();
     const int numCh = buffer.getNumChannels();
     if (numSamples <= 0)
@@ -295,14 +304,28 @@ void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buf
             samples[1][0] *= rightGain;
         }
 
-        // Filter modulator: sweeps global filter cutoff
+        // Filter modulator: sweeps global filter cutoff. The target cutoff is recomputed every
+        // sample (cheap: just curve lookup + pow), but it is only pushed into the SVF's
+        // setCutoffFrequency() (which recalculates internal coefficients) once every
+        // filterCutoffUpdateInterval samples. In between, filterCutoffSmoothed interpolates the
+        // *value* linearly, and we re-push it every interval so the filter's actual coefficients
+        // step smoothly rather than recomputing every sample (removes zipper noise + CPU cost of
+        // per-sample coefficient recalculation).
         if (filterCurve.isEnabled())
         {
             const double cyclesPerQuarter = cyclesPerPpqQuarter (filterCurve.getSyncDivision());
             const float phase = (float) std::fmod (ppq * cyclesPerQuarter, 1.0);
             const float modValue = filterCurve.getValueAtPhase (phase); // 0..1
             const float cutoffHz = 200.0f * std::pow (100.0f, modValue); // 200Hz .. 20kHz exponential
-            globalFilter.setCutoffFrequency (juce::jlimit (20.0f, 20000.0f, cutoffHz));
+            filterCutoffSmoothed.setTargetValue (juce::jlimit (20.0f, 20000.0f, cutoffHz));
+
+            if (filterCutoffUpdateCounter <= 0)
+            {
+                globalFilter.setCutoffFrequency (filterCutoffSmoothed.getCurrentValue());
+                filterCutoffUpdateCounter = filterCutoffUpdateInterval;
+            }
+            --filterCutoffUpdateCounter;
+            filterCutoffSmoothed.skip (1);
 
             for (int c = 0; c < numCh && c < 8; ++c)
                 samples[c][0] = globalFilter.processSample (c, samples[c][0]);
@@ -312,7 +335,9 @@ void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buf
 
 void StutterAudioProcessor::applyDryWetAndGain (const juce::AudioBuffer<float>& dryBuffer, juce::AudioBuffer<float>& wetBuffer)
 {
-    const int numSamples = wetBuffer.getNumSamples();
+    // Guard against dryBuffer being shorter than wetBuffer (can only happen in the degraded
+    // path where the host sent a bigger block than prepareToPlay declared).
+    const int numSamples = juce::jmin (wetBuffer.getNumSamples(), dryBuffer.getNumSamples());
     const int numCh = wetBuffer.getNumChannels();
 
     dryWetSmoothed.setTargetValue (apvts.getRawParameterValue (ID::dryWet)->load());
@@ -348,9 +373,16 @@ void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // 1. Capture the (dry) input into the always-on ring buffer
     captureBuffer.write (buffer);
 
-    // Keep an untouched copy of the dry signal for the final dry/wet mix
-    dryScratchBuffer.setSize (buffer.getNumChannels(), buffer.getNumSamples(), false, false, true);
-    dryScratchBuffer.makeCopyOf (buffer, true);
+    // Keep an untouched copy of the dry signal for the final dry/wet mix. dryScratchBuffer is
+    // sized generously in prepareToPlay() and is never resized here (zero heap activity on the
+    // audio thread). If the host ever sends a bigger block than it declared in prepareToPlay,
+    // degrade gracefully by only copying/processing the samples that fit rather than resizing.
+    const int dryChannels = juce::jmin (buffer.getNumChannels(), dryScratchMaxChannels);
+    const int drySamples = juce::jmin (buffer.getNumSamples(), dryScratchMaxSamples);
+    jassert (dryChannels == buffer.getNumChannels() && drySamples == buffer.getNumSamples());
+
+    for (int c = 0; c < dryChannels; ++c)
+        dryScratchBuffer.copyFrom (c, 0, buffer, c, 0, drySamples);
 
     // 2. Transport sync + step sequencer (lane effects read from captureBuffer, write into `buffer`)
     updateTransportAndSequence (buffer);

@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_data_structures/juce_data_structures.h>
+#include <cmath>
 #include <vector>
 #include "ParameterIDs.h"
 
@@ -73,11 +74,31 @@ public:
         else if (presetName == "SawUp")
             p = { { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 0.0f } };
         else if (presetName == "Sine")
-            p = { { 0.0f, 0.5f, 0.0f }, { 0.25f, 1.0f, 0.0f }, { 0.5f, 0.5f, 0.0f }, { 0.75f, 0.0f, 0.0f }, { 1.0f, 0.5f, 0.0f } };
+        {
+            // A flat curvature=0 4-point version linearly interpolates into a triangle wave, not
+            // a sine. Sample a true sine at 16 points (17 breakpoints incl. the closing point) and
+            // let the piecewise-linear segments approximate it -- max error vs. a true sine is
+            // under 0.01 in the 0..1 value range, which is smooth enough once baked into the
+            // 1024-entry lookup table and imperceptible in the resulting modulation.
+            constexpr int sineSegments = 16;
+            p.reserve (sineSegments + 1);
+            for (int i = 0; i <= sineSegments; ++i)
+            {
+                const float phase = (float) i / (float) sineSegments;
+                const float value = 0.5f + 0.5f * std::sin (juce::MathConstants<float>::twoPi * phase);
+                p.push_back ({ phase, value, 0.0f });
+            }
+        }
         else if (presetName == "Square")
             p = { { 0.0f, 1.0f, 1.0f }, { 0.5f, 1.0f, -1.0f }, { 0.5001f, 0.0f, 1.0f }, { 1.0f, 0.0f, -1.0f } };
         else if (presetName == "SidechainDuck")
-            p = { { 0.0f, 0.0f, 0.0f }, { 0.08f, 1.0f, -0.6f }, { 1.0f, 0.9f, 0.6f } };
+        {
+            // Musical sidechain-duck shape: sit at unity (0.5, since the Volume modulator maps
+            // 0..1 to 0..2x gain), snap down almost instantly to near-silence (the "duck"), then
+            // recover with a curved release -- fast at first, tapering off as it approaches
+            // unity again (curvature=0.6 -> exponent 10^-0.6=~0.25, an ease-out power curve).
+            p = { { 0.0f, 0.5f, 0.0f }, { 0.02f, 0.02f, 0.8f }, { 1.0f, 0.5f, 0.6f } };
+        }
         else if (presetName == "Steps")
             p = { { 0.0f, 0.0f, 1.0f }, { 0.24f, 0.0f, -1.0f }, { 0.25f, 0.5f, 1.0f }, { 0.49f, 0.5f, -1.0f },
                   { 0.5f, 1.0f, 1.0f }, { 0.74f, 1.0f, -1.0f }, { 0.75f, 0.25f, 1.0f }, { 1.0f, 0.25f, 0.0f } };

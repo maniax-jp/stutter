@@ -51,13 +51,13 @@ public:
         }
         else
         {
-            // Blend hard square with smooth sine window based on shape
+            // Blend hard square with a raised-cosine ("sine") window based on shape: at shape=0
+            // the gate is a hard on/off square; as shape rises toward 1 the open region's edges
+            // round off into a smooth half-cosine attack, giving a soft trance-gate feel.
             const float square = (pulsePhase < duty) ? 1.0f : 0.0f;
-            const float sineWin = 0.5f * (1.0f + std::sin (juce::MathConstants<float>::twoPi * ((float) pulsePhase - duty * 0.5f) - juce::MathConstants<float>::halfPi));
             const float smooth = pulsePhase < duty
                 ? 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * (float) (pulsePhase / duty))
                 : 0.0f;
-            juce::ignoreUnused (sineWin);
             g = square + shape * (smooth - square);
         }
 
@@ -65,8 +65,10 @@ public:
             channelSamples[c] *= g;
 
         phase += 1.0 / stepLenSamplesD;
+        // phase advances by a small fixed per-sample increment, so a plain subtract is exact
+        // (and cheaper than fmod) to wrap it back into [0,1).
         if (phase >= 1.0)
-            phase = std::fmod (phase, 1.0);
+            phase -= 1.0;
     }
 
 private:
