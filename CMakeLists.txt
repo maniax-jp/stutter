@@ -39,6 +39,12 @@ target_sources(Stutter
     PRIVATE
         src/PluginProcessor.cpp
         src/PluginEditor.cpp
+        src/ui/StutterLookAndFeel.cpp
+        src/ui/HeaderBar.cpp
+        src/ui/StepGrid.cpp
+        src/ui/LaneParamPanel.cpp
+        src/ui/CurveEditor.cpp
+        src/ui/BottomTabs.cpp
 )
 
 target_include_directories(Stutter
