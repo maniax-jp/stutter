@@ -1,3 +1,9 @@
 
 # Temporary files
 .tmp/
+
+# Build artifacts
+build/
+*.vst3
+*.component
+.DS_Store
