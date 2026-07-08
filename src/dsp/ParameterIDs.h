@@ -73,4 +73,21 @@ static const juce::Identifier propPosition  { "position" };  // 0..1 across the 
 static const juce::Identifier propValue     { "value" };     // 0..1 modulation value
 static const juce::Identifier propCurvature { "curvature" }; // -1..1, 0 = linear
 
+// ---- Curve neutral values: single source of truth ----
+// Every modulation curve's 0..1 range maps to a "no-op" flat value differently depending on
+// what it modulates. Volume (0..1 -> 0..2x gain) and Pan (0..1 -> -1..1 pan pos) are both
+// neutral at 0.5 (unity gain / center pan). Filter (0..1 -> 200Hz..20kHz exponential) is neutral
+// at 1.0 (fully open, ~20kHz, i.e. leaves the signal untouched) -- 0.5 there would be an audible
+// ~2kHz lowpass. This is the ONE place these numbers are hardcoded; CurveModulator's default
+// construction, PluginProcessor's curves array, and PresetManager's preset-building all pull
+// from here rather than each hardcoding their own copy.
+static const juce::String curveNameVolume = "Volume";
+static const juce::String curveNameFilter = "Filter";
+static const juce::String curveNamePan    = "Pan";
+
+inline float neutralValueForCurve (const juce::String& curveName) noexcept
+{
+    return curveName == curveNameFilter ? 1.0f : 0.5f;
+}
+
 } // namespace stutter::ID

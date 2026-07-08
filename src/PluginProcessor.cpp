@@ -165,6 +165,10 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     filterCutoffSmoothed.reset (sampleRate, 0.01);
     filterCutoffSmoothed.setCurrentAndTargetValue (20000.0f);
     filterCutoffUpdateCounter = 0;
+    // Cutoff starts at the fully-open ceiling (matches globalFilter's initial 20000Hz cutoff
+    // above), so the bypass state starts "on" too -- consistent with the engage/disengage
+    // hysteresis in applyGlobalModulators.
+    globalFilterBypassed = true;
 
     // Allocate generously so processBlock never needs to resize on the audio thread, even if
     // the host later calls processBlock with a larger buffer than it declared in prepareToPlay.
@@ -317,7 +321,7 @@ void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buf
         {
             const double cyclesPerQuarter = cyclesPerPpqQuarter (filterCurve.getSyncDivision());
             const float phase = (float) std::fmod (ppq * cyclesPerQuarter, 1.0);
-            const float modValue = filterCurve.getValueAtPhase (phase); // 0..1
+            const float modValue = filterCurve.getValueAtPhase (phase); // 0..1, 1.0 = neutral/no-op
             const float cutoffHz = 200.0f * std::pow (100.0f, modValue); // 200Hz .. 20kHz exponential
             filterCutoffSmoothed.setTargetValue (juce::jlimit (20.0f, 20000.0f, cutoffHz));
 
@@ -329,8 +333,47 @@ void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buf
             --filterCutoffUpdateCounter;
             filterCutoffSmoothed.skip (1);
 
-            for (int c = 0; c < numCh && c < 8; ++c)
-                samples[c][0] = globalFilter.processSample (c, samples[c][0]);
+            // At/near the fully-open cutoff (modValue ~1.0, i.e. Init/neutral state, or any
+            // curve that momentarily reaches the top of its range) the SVF's cutoff sits right
+            // at the 20kHz ceiling -- mathematically near-transparent, but close enough to
+            // Nyquist at common sample rates that its resonance (0.3) can still leave a faint
+            // high-frequency response ripple. Since the whole point of "neutral" is zero audible
+            // effect, bypass the filter outright once its target cutoff is within a hair of the
+            // ceiling rather than actually running the near-transparent-but-not-quite coefficients.
+            //
+            // Two separate thresholds (rather than one) give this hysteresis: once bypassed, the
+            // filter only re-engages when the cutoff drops meaningfully below the ceiling
+            // (engageCutoffHz), and once engaged, it only bypasses again once it's very close to
+            // the ceiling (disengageCutoffHz). Without this gap, a smoothed cutoff hovering right
+            // at a single threshold could flip the bypass on/off every sample (chattering).
+            constexpr float engageCutoffHz = 19950.0f;    // below this: filter turns ON
+            constexpr float disengageCutoffHz = 19999.0f; // at/above this: filter is bypassed
+            const float currentCutoff = filterCutoffSmoothed.getCurrentValue();
+
+            if (globalFilterBypassed)
+            {
+                if (currentCutoff < engageCutoffHz)
+                {
+                    // Bypass -> engage transition: the SVF's internal integrator state (s1/s2)
+                    // was never updated while bypassed, so it's stale relative to the signal
+                    // that's about to start flowing through it again. Resetting here (state
+                    // clear only, RT-safe per JUCE's StateVariableTPTFilter::reset()) avoids
+                    // resuming from old state and producing a transient click.
+                    globalFilter.reset();
+                    globalFilterBypassed = false;
+                }
+            }
+            else
+            {
+                if (currentCutoff >= disengageCutoffHz)
+                    globalFilterBypassed = true;
+            }
+
+            if (! globalFilterBypassed)
+            {
+                for (int c = 0; c < numCh && c < 8; ++c)
+                    samples[c][0] = globalFilter.processSample (c, samples[c][0]);
+            }
         }
     }
 }
@@ -447,13 +490,19 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
     apvts.replaceState (paramsOnlyState);
 
-    if (sequencerTree.isValid())
-        sequencer.fromValueTree (sequencerTree);
+    // Always route through fromValueTree(), even when sequencerTree/curvesTree (or an individual
+    // curve within it) is missing -- StepSequencer::fromValueTree() clears the grid up front, and
+    // CurveModulator::fromValueTree() resets to its neutral default on an invalid tree, so a
+    // preset that omits this structural data (old/hand-edited user presets, presets that don't
+    // touch a given curve, etc.) always yields a full reset rather than leaving residue from
+    // whatever was previously loaded.
+    sequencer.fromValueTree (sequencerTree);
 
-    if (curvesTree.isValid())
+    static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
+    for (size_t i = 0; i < curves.size(); ++i)
     {
-        static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
-        for (size_t i = 0; i < curves.size(); ++i)
+        juce::ValueTree matchedCurve; // invalid by default -> fromValueTree() resets to neutral
+        if (curvesTree.isValid())
         {
             for (int c = 0; c < curvesTree.getNumChildren(); ++c)
             {
@@ -461,11 +510,12 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
                 if (child.hasType (ID::curveNode)
                     && child.getProperty (ID::propName).toString() == curveNames[i].toString())
                 {
-                    curves[i].fromValueTree (child);
+                    matchedCurve = child;
                     break;
                 }
             }
         }
+        curves[i].fromValueTree (matchedCurve);
     }
 }
 

@@ -7,9 +7,21 @@
 // metrics (max adjacent-sample delta, count of deltas over a threshold, RMS) so the effect of
 // the DSP fix can be measured numerically before/after.
 //
+// Also runs headless regression checks for the Init-preset / curve-residue bugs:
+//  (a) a fresh instance's default output matches the dry signal (no audible coloration from
+//      curve modulators that should be neutral out of the box)
+//  (b) loading "Trance Gate 16th" (which sets a non-neutral Volume curve) and then loading
+//      "Init" resets all three curves (Volume/Filter/Pan) to neutral flat + expected enabled
+//      state -- i.e. no residue from the previous preset.
+//  (c) malformed/incomplete curve-tree fixtures (missing curveNode, <2 Points, a Point missing
+//      its "value" property) each fall back to that curve's neutral value rather than leaving
+//      stale or garbage state.
+//
 // Usage: render_test <output-directory>
 
 #include "PluginProcessor.h"
+#include "PresetManager.h"
+#include "dsp/CurveModulator.h"
 #include "dsp/ParameterIDs.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -123,6 +135,268 @@ void setAllStepsOn (stutter::StepSequencer& seq, int lane)
 {
     for (int s = 0; s < stutter::numSteps; ++s)
         seq.setStep (lane, s, true);
+}
+
+double rmsOf (const juce::AudioBuffer<float>& buf)
+{
+    double sumSq = 0.0;
+    const int n = buf.getNumSamples();
+    const int ch = buf.getNumChannels();
+    for (int c = 0; c < ch; ++c)
+    {
+        const float* d = buf.getReadPointer (c);
+        for (int i = 0; i < n; ++i)
+            sumSq += (double) d[i] * (double) d[i];
+    }
+    return std::sqrt (sumSq / (double) juce::jmax (1, n * ch));
+}
+
+// Checks that a curve is "neutral": enabled state as expected, flat value == expectedValue
+// across the whole table (sampled), i.e. contributes no audible modulation.
+bool isCurveNeutral (const stutter::CurveModulator& c, float expectedValue, const char* label)
+{
+    bool ok = true;
+    for (int i = 0; i <= 16; ++i)
+    {
+        const float phase = (float) i / 16.0f;
+        const float v = c.getValueAtPhase (phase);
+        if (std::abs (v - expectedValue) > 1.0e-4f)
+        {
+            printf ("  FAIL: %s curve not flat at phase %.3f -> %.6f (expected %.6f)\n",
+                    label, phase, v, expectedValue);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// (a) Fresh-instance default output must match dry signal (RMS diff < 0.1dB-equivalent).
+bool testFreshInstanceIsTransparent()
+{
+    printf ("\n[Test A] Fresh instance default output vs dry signal\n");
+
+    StutterAudioProcessor processor;
+    processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    auto& apvts = processor.getAPVTS();
+    apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
+    processor.setInternalBpm (kBpm);
+    // Sequencer stays fully OFF (freshly constructed) -- we're isolating the global
+    // Volume/Filter/Pan curve modulators, which run regardless of the step sequencer.
+
+    const int totalSamples = (int) std::round (2.0 * kSampleRate); // 2 seconds is plenty
+    juce::AudioBuffer<float> source (2, totalSamples);
+    fillTestSignal (source, kSampleRate, kBpm);
+
+    juce::AudioBuffer<float> rendered (2, totalSamples);
+    rendered.clear();
+
+    int pos = 0;
+    juce::MidiBuffer midi;
+    while (pos < totalSamples)
+    {
+        const int n = juce::jmin (kBlockSize, totalSamples - pos);
+        juce::AudioBuffer<float> block (2, kBlockSize);
+        block.clear();
+        for (int c = 0; c < 2; ++c)
+            block.copyFrom (c, 0, source, c, pos, n);
+
+        midi.clear();
+        processor.processBlock (block, midi);
+
+        for (int c = 0; c < 2; ++c)
+            rendered.copyFrom (c, pos, block, c, 0, n);
+        pos += n;
+    }
+
+    // Skip the first block (filter/smoothing settling from cold state).
+    const int analysisStart = juce::jmin (kBlockSize, totalSamples);
+    juce::AudioBuffer<float> dryView (source.getArrayOfWritePointers(), 2, analysisStart, totalSamples - analysisStart);
+    juce::AudioBuffer<float> wetView (rendered.getArrayOfWritePointers(), 2, analysisStart, totalSamples - analysisStart);
+
+    const double dryRms = rmsOf (dryView);
+    const double wetRms = rmsOf (wetView);
+    const double dbDiff = 20.0 * std::log10 (juce::jmax (1.0e-12, wetRms) / juce::jmax (1.0e-12, dryRms));
+
+    // Also check per-sample max abs diff, since RMS could mask e.g. a filter that changes
+    // spectral content but not overall level.
+    double maxAbsDiff = 0.0;
+    for (int c = 0; c < 2; ++c)
+    {
+        const float* d = dryView.getReadPointer (c);
+        const float* w = wetView.getReadPointer (c);
+        for (int i = 0; i < dryView.getNumSamples(); ++i)
+            maxAbsDiff = juce::jmax (maxAbsDiff, (double) std::abs (d[i] - w[i]));
+    }
+
+    printf ("  dry RMS=%.6f  wet RMS=%.6f  dB diff=%.4f dB  maxAbsSampleDiff=%.6f\n",
+            dryRms, wetRms, dbDiff, maxAbsDiff);
+
+    const bool pass = std::abs (dbDiff) < 0.1 && maxAbsDiff < 0.01;
+    printf ("  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// (b) "Trance Gate 16th" -> "Init" preset transition must reset all 3 curves to neutral.
+bool testPresetTransitionResetsCurves()
+{
+    printf ("\n[Test B] Trance Gate 16th -> Init resets all curves to neutral\n");
+
+    StutterAudioProcessor processor;
+    processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    auto& pm = processor.getPresetManager();
+    const auto& presets = pm.getPresets();
+
+    int tranceIdx = -1, initIdx = -1;
+    for (int i = 0; i < (int) presets.size(); ++i)
+    {
+        if (presets[(size_t) i].name == "Trance Gate 16th") tranceIdx = i;
+        if (presets[(size_t) i].name == "Init") initIdx = i;
+    }
+
+    if (tranceIdx < 0 || initIdx < 0)
+    {
+        printf ("  FAIL: could not find required presets (Trance=%d, Init=%d)\n", tranceIdx, initIdx);
+        return false;
+    }
+
+    pm.loadPreset (tranceIdx);
+    pm.loadPreset (initIdx);
+
+    bool pass = true;
+
+    auto& volumeCurve = processor.getCurve (stutter::ModTarget::Volume);
+    auto& filterCurve = processor.getCurve (stutter::ModTarget::Filter);
+    auto& panCurve    = processor.getCurve (stutter::ModTarget::Pan);
+
+    printf ("  Volume: enabled=%d points=%zu\n", volumeCurve.isEnabled(), volumeCurve.getPoints().size());
+    printf ("  Filter: enabled=%d points=%zu\n", filterCurve.isEnabled(), filterCurve.getPoints().size());
+    printf ("  Pan:    enabled=%d points=%zu\n", panCurve.isEnabled(), panCurve.getPoints().size());
+
+    if (! isCurveNeutral (volumeCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNameVolume), "Volume")) pass = false;
+    if (! isCurveNeutral (filterCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter), "Filter")) pass = false; // neutral = fully open (20kHz), not 0.5
+    if (! isCurveNeutral (panCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNamePan), "Pan")) pass = false;
+
+    // Filter must not be silently left "on" at a non-neutral value that audibly colors the
+    // signal; since neutral flat value (1.0 = cutoff wide open) makes enabled state irrelevant
+    // to the *sound*, we don't hard-require disabled here -- only that IF enabled, it's flat 1.0.
+    if (filterCurve.isEnabled() && ! isCurveNeutral (filterCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter), "Filter(enabled-check)"))
+        pass = false;
+
+    printf ("  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// (c) Malformed-state regression fixtures: CurveModulator::fromValueTree() must fall back to
+// neutral (rather than leaving stale/garbage state) whenever the incoming tree is structurally
+// incomplete. Covers three distinct shapes of "missing data" a hand-edited or older-version
+// preset XML could plausibly contain:
+//   1. Curves node present, but this particular curve's Curve node is entirely absent (invalid
+//      tree passed straight through, same path as "Curves node missing altogether").
+//   2. Curve node present but with only a single Point child (or none) -- not enough points to
+//      define a curve.
+//   3. Curve node with >=2 Point children, but a Point is missing its "value" property.
+bool testMalformedCurveTreeFixtures()
+{
+    printf ("\n[Test C] Malformed curve-tree fixtures fall back to neutral\n");
+    bool pass = true;
+
+    const float volumeNeutral = stutter::ID::neutralValueForCurve (stutter::ID::curveNameVolume);
+    const float filterNeutral = stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter);
+
+    // Fixture 1: curveNode entirely missing for this curve (an invalid/default-constructed tree,
+    // exactly what PluginProcessor::setStateInformation() passes when it can't find a matching
+    // <Curve name="..."> child under <Curves>).
+    {
+        stutter::CurveModulator curve (filterNeutral);
+        curve.setPoints ({ { 0.0f, 0.1f, 0.0f }, { 1.0f, 0.9f, 0.5f } }); // give it non-neutral state first
+        juce::ValueTree missing; // default-constructed == invalid
+        curve.fromValueTree (missing);
+        if (! isCurveNeutral (curve, filterNeutral, "Fixture1-Filter(missing curveNode)"))
+            pass = false;
+        if (curve.getPoints().size() < 2)
+        {
+            printf ("  FAIL: Fixture1 left curve with <2 points\n");
+            pass = false;
+        }
+    }
+
+    // Fixture 2: Curve node exists but has only one Point child (not enough to define a curve).
+    {
+        stutter::CurveModulator curve (volumeNeutral);
+        curve.setPoints ({ { 0.0f, 0.1f, 0.0f }, { 1.0f, 0.9f, 0.5f } });
+
+        juce::ValueTree curveTree (stutter::ID::curveNode);
+        curveTree.setProperty (stutter::ID::propEnabled, true, nullptr);
+        curveTree.setProperty (stutter::ID::propSyncDiv, 4, nullptr);
+        juce::ValueTree onlyPoint (stutter::ID::pointNode);
+        onlyPoint.setProperty (stutter::ID::propPosition, 0.5f, nullptr);
+        onlyPoint.setProperty (stutter::ID::propValue, 0.9f, nullptr);
+        curveTree.appendChild (onlyPoint, nullptr);
+
+        curve.fromValueTree (curveTree);
+        if (! isCurveNeutral (curve, volumeNeutral, "Fixture2-Volume(1 point)"))
+            pass = false;
+        if (curve.getPoints().size() < 2)
+        {
+            printf ("  FAIL: Fixture2 left curve with <2 points\n");
+            pass = false;
+        }
+    }
+
+    // Fixture 2b: Curve node exists with zero Point children.
+    {
+        stutter::CurveModulator curve (volumeNeutral);
+        curve.setPoints ({ { 0.0f, 0.1f, 0.0f }, { 1.0f, 0.9f, 0.5f } });
+
+        juce::ValueTree curveTree (stutter::ID::curveNode);
+        curveTree.setProperty (stutter::ID::propEnabled, true, nullptr);
+        curveTree.setProperty (stutter::ID::propSyncDiv, 4, nullptr);
+
+        curve.fromValueTree (curveTree);
+        if (! isCurveNeutral (curve, volumeNeutral, "Fixture2b-Volume(0 points)"))
+            pass = false;
+    }
+
+    // Fixture 3: Curve node with >=2 points, but one Point is missing its "value" property --
+    // must fall back to this curve's neutral value for that point, not JUCE's ValueTree default
+    // (0.0), which previously would have been a hardcoded 0.5f fallback baked into
+    // CurveModulator::fromValueTree() regardless of which curve it was.
+    {
+        stutter::CurveModulator curve (filterNeutral);
+
+        juce::ValueTree curveTree (stutter::ID::curveNode);
+        curveTree.setProperty (stutter::ID::propEnabled, true, nullptr);
+        curveTree.setProperty (stutter::ID::propSyncDiv, 4, nullptr);
+
+        juce::ValueTree pt0 (stutter::ID::pointNode);
+        pt0.setProperty (stutter::ID::propPosition, 0.0f, nullptr);
+        // propValue deliberately omitted -- should fall back to filterNeutral (1.0), not 0.5.
+        pt0.setProperty (stutter::ID::propCurvature, 0.0f, nullptr);
+        curveTree.appendChild (pt0, nullptr);
+
+        juce::ValueTree pt1 (stutter::ID::pointNode);
+        pt1.setProperty (stutter::ID::propPosition, 1.0f, nullptr);
+        pt1.setProperty (stutter::ID::propValue, 0.3f, nullptr);
+        pt1.setProperty (stutter::ID::propCurvature, 0.0f, nullptr);
+        curveTree.appendChild (pt1, nullptr);
+
+        curve.fromValueTree (curveTree);
+        const float v0 = curve.getValueAtPhase (0.0f);
+        printf ("  Fixture3: point0 (missing propValue) resolved to %.6f (expected neutral %.6f)\n",
+                v0, filterNeutral);
+        if (std::abs (v0 - filterNeutral) > 1.0e-4f)
+        {
+            printf ("  FAIL: Fixture3 missing-propValue point did not fall back to curve's neutral value\n");
+            pass = false;
+        }
+    }
+
+    printf ("  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
 }
 
 } // namespace
@@ -251,6 +525,15 @@ int main (int argc, char* argv[])
     printf ("--------------------------------------------------------------------------------------\n");
     printf ("pass = (>%.2f count == 0) AND (rangeViol == 0); %s\n", kClickThreshold,
             anyFailures ? "SOME LANES FAILED" : "ALL LANES PASS");
+
+    const bool testAPass = testFreshInstanceIsTransparent();
+    const bool testBPass = testPresetTransitionResetsCurves();
+    const bool testCPass = testMalformedCurveTreeFixtures();
+    if (! testAPass || ! testBPass || ! testCPass)
+        anyFailures = true;
+
+    printf ("\n========================================================================================\n");
+    printf ("OVERALL: %s\n", anyFailures ? "FAIL" : "PASS");
 
     return anyFailures ? 1 : 0;
 }

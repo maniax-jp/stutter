@@ -118,8 +118,17 @@ public:
         return tree;
     }
 
+    /** Loads the step grid from `tree`. Always starts by clearing every step to OFF first --
+        if `tree` is missing/invalid, or only covers some lanes/steps (e.g. a preset saved before
+        a lane existed, or one that legitimately leaves a lane fully OFF and so has no Step
+        children for it), those steps end up OFF rather than retaining whatever the previously-
+        loaded preset left there. This guarantees preset switches never leave step-grid residue
+        from the prior state. */
     void fromValueTree (const juce::ValueTree& tree)
     {
+        for (auto& lane : steps)
+            lane.fill (false);
+
         if (! tree.isValid())
             return;
 

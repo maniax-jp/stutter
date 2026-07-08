@@ -29,12 +29,30 @@ class CurveModulator
 public:
     static constexpr int tableSize = 1024;
 
-    CurveModulator()
+    /** neutralFlatValue is the flat value (0..1) that makes this curve a no-op for whichever
+        target it modulates. CurveModulator itself doesn't know which target it belongs to, so
+        callers should pass stutter::ID::neutralValueForCurve (curveName) -- the single source of
+        truth for these numbers (0.5 for Volume/Pan, 1.0 for Filter; see ParameterIDs.h for why).
+        Every CurveModulator (freshly constructed, or reset via resetToDefault()) starts enabled +
+        flat at this value, so a freshly-instantiated plugin and a "reset to Init" plugin are
+        acoustically identical and both transparent (no audible change vs. the dry signal). */
+    explicit CurveModulator (float neutralFlatValue = 0.5f) : neutralValue (neutralFlatValue)
     {
-        // Default: flat line at 0.5 (no modulation)
-        points = { { 0.0f, 0.5f, 0.0f }, { 1.0f, 0.5f, 0.0f } };
+        resetToDefault();
+    }
+
+    /** Restores this curve to its neutral flat line (2 points at neutralValue, curvature 0),
+        enabled, default sync division. Used both by the constructor and anywhere state needs to
+        be reset to "no-op" defaults (e.g. a preset that doesn't specify this curve at all). */
+    void resetToDefault()
+    {
+        points = { { 0.0f, neutralValue, 0.0f }, { 1.0f, neutralValue, 0.0f } };
+        enabled = true;
+        syncDivIndex = 4;
         bakeTable();
     }
+
+    float getNeutralValue() const noexcept { return neutralValue; }
 
     void setPoints (std::vector<CurvePoint> newPoints)
     {
@@ -125,13 +143,21 @@ public:
         return tree;
     }
 
+    /** Loads this curve's state from `tree`. If `tree` is missing/invalid (e.g. a preset that
+        doesn't include a Curves node, or is missing this particular curve's node), the curve is
+        reset to its neutral default rather than left holding whatever the previously-loaded
+        preset put there -- this is what guarantees preset switches never leave residue from the
+        prior state, even for presets authored/saved before a curve existed in their state. */
     void fromValueTree (const juce::ValueTree& tree)
     {
         if (! tree.isValid())
+        {
+            resetToDefault();
             return;
+        }
 
         enabled = tree.getProperty (ID::propEnabled, true);
-        syncDivIndex = tree.getProperty (ID::propSyncDiv, syncDivIndex);
+        syncDivIndex = tree.getProperty (ID::propSyncDiv, 4);
 
         std::vector<CurvePoint> pts;
         for (int i = 0; i < tree.getNumChildren(); ++i)
@@ -141,7 +167,7 @@ public:
             {
                 CurvePoint p;
                 p.position = child.getProperty (ID::propPosition, 0.0f);
-                p.value = child.getProperty (ID::propValue, 0.5f);
+                p.value = child.getProperty (ID::propValue, neutralValue);
                 p.curvature = child.getProperty (ID::propCurvature, 0.0f);
                 pts.push_back (p);
             }
@@ -149,6 +175,13 @@ public:
 
         if (pts.size() >= 2)
             setPoints (std::move (pts));
+        else
+        {
+            // Tree was valid but had no usable point data -- still reset points to neutral so
+            // we don't silently keep stale points from the previously-loaded preset.
+            points = { { 0.0f, neutralValue, 0.0f }, { 1.0f, neutralValue, 0.0f } };
+            bakeTable();
+        }
     }
 
 private:
@@ -199,6 +232,7 @@ private:
     std::array<float, tableSize> table {};
     bool enabled = true;
     int syncDivIndex = 4; // index into tempo-sync division table, default 1/4 bar or similar
+    const float neutralValue; // flat value that makes this curve a no-op; 0.5 for Volume/Pan, 1.0 for Filter
 };
 
 } // namespace stutter

@@ -89,7 +89,17 @@ private:
 
     stutter::CaptureBuffer captureBuffer;
     stutter::StepSequencer sequencer;
-    std::array<stutter::CurveModulator, (size_t) stutter::ModTarget::Count> curves;
+
+    // Order matches ModTarget: Volume, Filter, Pan. Each starts enabled + flat at its own
+    // neutral value (see stutter::ID::neutralValueForCurve, the single source of truth: 0.5 =
+    // unity/center for Volume/Pan; 1.0 = fully-open 20kHz cutoff for Filter, since Filter's 0..1
+    // range maps exponentially to 200Hz..20kHz and 0.5 would be an audible ~2kHz cut) so a
+    // freshly-instantiated plugin is acoustically transparent, matching the Init preset exactly.
+    std::array<stutter::CurveModulator, (size_t) stutter::ModTarget::Count> curves {
+        stutter::CurveModulator (stutter::ID::neutralValueForCurve (stutter::ID::curveNameVolume)),
+        stutter::CurveModulator (stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter)),
+        stutter::CurveModulator (stutter::ID::neutralValueForCurve (stutter::ID::curveNamePan)),
+    };
 
     // Constructed last (after apvts/sequencer/curves exist) since it reads them when building
     // factory preset states; declared last so member destruction order doesn't matter either way.
@@ -107,6 +117,13 @@ private:
     // sample, which is both a CPU hit and a source of zipper noise on fast LFO sweeps.
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> filterCutoffSmoothed;
     int filterCutoffUpdateCounter = 0;
+
+    // Tracks whether globalFilter is currently being bypassed (cutoff pinned at/near the fully-
+    // open ceiling -- see applyGlobalModulators). Hysteresis avoids on/off chattering when the
+    // smoothed cutoff hovers around the threshold; on the bypass->engage transition we reset()
+    // the filter so it doesn't resume processing from stale internal state (see High-severity
+    // fix in applyGlobalModulators).
+    bool globalFilterBypassed = true;
 
     juce::AudioBuffer<float> dryScratchBuffer;
     int dryScratchMaxChannels = 2;

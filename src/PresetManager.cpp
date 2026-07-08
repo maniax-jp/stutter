@@ -88,21 +88,22 @@ juce::ValueTree buildCurveTree (const juce::String& name, bool enabled, int sync
     curveTree.setProperty (ID::propEnabled, enabled, nullptr);
     curveTree.setProperty (ID::propSyncDiv, syncDiv, nullptr);
 
-    // Default flat line (matches CurveModulator's own default) when a preset leaves a curve
-    // untouched -- still needs >=2 points for CurveModulator::fromValueTree to accept it.
+    // Default flat line (matches CurveModulator's own neutral default) when a preset leaves a
+    // curve untouched -- still needs >=2 points for CurveModulator::fromValueTree to accept it.
     if (points.empty())
     {
+        const float neutral = ID::neutralValueForCurve (name);
         curveTree.appendChild ([&] {
             juce::ValueTree pt (ID::pointNode);
             pt.setProperty (ID::propPosition, 0.0f, nullptr);
-            pt.setProperty (ID::propValue, 0.5f, nullptr);
+            pt.setProperty (ID::propValue, neutral, nullptr);
             pt.setProperty (ID::propCurvature, 0.0f, nullptr);
             return pt;
         }(), nullptr);
         curveTree.appendChild ([&] {
             juce::ValueTree pt (ID::pointNode);
             pt.setProperty (ID::propPosition, 1.0f, nullptr);
-            pt.setProperty (ID::propValue, 0.5f, nullptr);
+            pt.setProperty (ID::propValue, neutral, nullptr);
             pt.setProperty (ID::propCurvature, 0.0f, nullptr);
             return pt;
         }(), nullptr);
@@ -140,6 +141,10 @@ juce::ValueTree buildCurvesTree (const std::vector<FactoryPresetDef::CurveDef>& 
         if (match != nullptr)
             curvesTree.appendChild (buildCurveTree (name, match->enabled, match->syncDiv, match->points), nullptr);
         else
+            // Preset doesn't mention this curve at all -- leave it OFF (no audible effect either
+            // way, since disabled short-circuits before the curve value is even read) but still
+            // give it a fully-formed neutral-flat tree so no lane of the Curves node is ever
+            // missing/incomplete.
             curvesTree.appendChild (buildCurveTree (name, false, 4 /* default 1/4-ish */, {}), nullptr);
     }
 
@@ -280,10 +285,19 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
 
     if (entry.name == "Init")
     {
-        // Init: every parameter at its default, sequencer fully OFF, curves default/disabled.
+        // Init: every parameter at its default, sequencer fully OFF, and -- per spec -- all
+        // three curves (Volume/Filter/Pan) ON but each flat at its own neutral value, so Init is
+        // acoustically transparent (identical to a freshly-instantiated plugin) rather than
+        // silently applying a coloring effect (e.g. Filter flat at 0.5 previously meant an
+        // audible ~2kHz lowpass despite looking "off").
         FactoryPresetDef initDef;
         initDef.name = "Init";
         initDef.category = "Init";
+        initDef.curves = {
+            { "Volume", true, 4, {} },
+            { "Filter", true, 4, {} },
+            { "Pan",    true, 4, {} },
+        };
         return buildFullStateTree (proc.getAPVTS(), initDef);
     }
 
