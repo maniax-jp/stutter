@@ -35,9 +35,9 @@ public:
         lfoPhase = 0.0;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples) override
+    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture);
+        juce::ignoreUnused (capture, nowAbs);
         filterType = (int) getParam (ID::filterType, 0.0f);
         cutoffHz = getParam (ID::filterCutoff, 1000.0f);
         resonance = juce::jlimit (0.0f, 0.99f, getParam (ID::filterResonance, 0.2f));
@@ -48,9 +48,10 @@ public:
         lfoPhase = 0.0;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
+                         juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture, progress);
+        juce::ignoreUnused (capture, progress, nowAbs);
 
         const float lfoValue = lfoDepth > 0.0f
             ? std::sin (juce::MathConstants<float>::twoPi * (float) std::fmod (lfoPhase * lfoCyclesPerStep, 1.0))

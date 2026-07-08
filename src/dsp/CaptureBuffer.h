@@ -113,6 +113,53 @@ public:
         return data[i0] + frac * (data[i1] - data[i0]);
     }
 
+    /** Read a single interpolated sample (linear) for a channel at an absolute position in the
+        capture buffer's monotonic time coordinate (same units as getTotalWritten(): "samples
+        written since prepare()/reset()"). Unlike readInterpolated() (which is relative to the
+        *current* write head and therefore silently shifts every block as writePos advances),
+        this reads a position that is fixed once computed -- callers that need a stable anchor
+        (e.g. a Buffer-category lane effect that latched a slice at onStepStart) must use this
+        instead of recomputing "samplesAgo" against a moving write head.
+
+        absolutePos is clamped to the valid history window: no newer than the last sample
+        actually written (can't read the future) and no older than one buffer-length behind it
+        (can't read already-overwritten data). Out-of-range requests are clamped to the nearest
+        valid edge rather than wrapping, so a caller that mis-tracks its anchor degrades to a
+        held/repeated edge sample rather than jumping to unrelated audio. */
+    float readInterpolatedAbsolute (int channel, double absolutePos) const noexcept
+    {
+        if (lengthSamples < 3)
+            return 0.0f;
+
+        channel = juce::jlimit (0, numCh - 1, channel);
+
+        const juce::int64 written = totalWritten.load (std::memory_order_relaxed);
+        if (written <= 0)
+            return 0.0f; // nothing captured yet
+
+        // Valid window: [written - (lengthSamples - 2), written - 1]. The upper bound is the
+        // last sample actually written -- position `written` itself has NOT been written yet,
+        // and its ring slot still holds the *oldest* sample (one full buffer-length in the
+        // past), so clamping there would silently return audio from a whole revolution ago.
+        // The lower bound prevents reading samples already overwritten by the ring wrapping
+        // around; its extra sample of headroom (-2 rather than -1) keeps i1 = i0 + 1 inside
+        // valid data for the interpolation below.
+        const double upperBound = (double) written - 1.0;
+        const double lowerBound = (double) written - (double) (lengthSamples - 2);
+        absolutePos = juce::jlimit (lowerBound, upperBound, absolutePos);
+
+        double wrapped = std::fmod (absolutePos, (double) lengthSamples);
+        if (wrapped < 0)
+            wrapped += (double) lengthSamples;
+
+        const int i0 = (int) wrapped;
+        const int i1 = (i0 + 1) % lengthSamples;
+        const float frac = (float) (wrapped - (double) i0);
+
+        const float* data = buffer.getReadPointer (channel);
+        return data[i0] + frac * (data[i1] - data[i0]);
+    }
+
     /** Direct (non-interpolated) read, `samplesAgo` samples before the write head. */
     float readSample (int channel, int samplesAgo) const noexcept
     {

@@ -25,22 +25,33 @@ public:
     {
         phase = 0.0;
         pulsesPerStep = 4.0;
+        smoothedGain = 0.0f;
+        maxStepPerSample = 1.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples) override
+    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture);
+        juce::ignoreUnused (capture, nowAbs);
         const float rateParam = getParam (ID::gateRate, 4.0f); // pulses-per-step index
         duty = juce::jlimit (0.01f, 0.99f, getParam (ID::gateDuty, 0.5f));
         shape = juce::jlimit (0.0f, 1.0f, getParam (ID::gateShape, 0.0f));
         pulsesPerStep = rateToPulses ((int) rateParam);
         stepLenSamplesD = juce::jmax (1.0, (double) stepLengthSamples);
         phase = 0.0;
+        // Minimum edge slew: even at shape=0 (hard square), the gate's gain can never move from
+        // 0<->1 in fewer than ~1.5ms of samples. This is independent of the shape parameter's
+        // "smooth window" (which shapes the sustained open-region envelope, not the edge speed
+        // at shape=0) -- without it, shape=0 produces a true zero-time transition, which is an
+        // instant discontinuity in the output waveform and clicks on every pulse edge.
+        constexpr double minEdgeSeconds = 0.0015; // 1.5ms
+        const double edgeSamples = juce::jmax (1.0, sampleRate * minEdgeSeconds);
+        maxStepPerSample = (float) (1.0 / edgeSamples);
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
+                         juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture, progress);
+        juce::ignoreUnused (capture, progress, nowAbs);
 
         const double pulsePhase = std::fmod (phase * pulsesPerStep, 1.0);
 
@@ -61,8 +72,17 @@ public:
             g = square + shape * (smooth - square);
         }
 
+        // Slew-limit toward the target gain by at most maxStepPerSample per sample, guaranteeing
+        // a minimum edge time regardless of `shape`. At shape>0 this is normally a no-op (the
+        // raised-cosine window is already slower than the min-slew rate); at shape=0 it turns
+        // the instantaneous square edge into a ~1.5ms ramp.
+        if (smoothedGain < g)
+            smoothedGain = juce::jmin (g, smoothedGain + maxStepPerSample);
+        else if (smoothedGain > g)
+            smoothedGain = juce::jmax (g, smoothedGain - maxStepPerSample);
+
         for (int c = 0; c < numCh; ++c)
-            channelSamples[c] *= g;
+            channelSamples[c] *= smoothedGain;
 
         phase += 1.0 / stepLenSamplesD;
         // phase advances by a small fixed per-sample increment, so a plain subtract is exact
@@ -97,6 +117,8 @@ private:
     double stepLenSamplesD = 11025.0;
     float duty = 0.5f;
     float shape = 0.0f;
+    float smoothedGain = 0.0f;
+    float maxStepPerSample = 1.0f;
 };
 
 } // namespace stutter

@@ -168,12 +168,21 @@ public:
             return;
         }
 
+        // capture.write() (called by the processor before this) already wrote this whole block,
+        // so totalWritten reflects the position *after* the last sample of the block. Sample n
+        // within this block therefore sits at (totalWritten - numSamples + n) in the
+        // CaptureBuffer's absolute coordinate -- this is the fixed anchor coordinate passed to
+        // lane effects so their reads no longer drift with the moving write head.
+        const juce::int64 totalWrittenAfterBlock = capture.getTotalWritten();
+        const juce::int64 blockStartAbs = totalWrittenAfterBlock - (juce::int64) numSamples;
+
         // 16th note = 0.25 quarter notes
         constexpr double stepLengthPpq = 0.25;
         constexpr double patternLengthPpq = stepLengthPpq * (double) numSteps; // 4 quarter notes = 1 bar of 16ths
 
         for (int n = 0; n < numSamples; ++n)
         {
+            const juce::int64 nowAbs = blockStartAbs + (juce::int64) n;
             const double ppq = ppqAtBlockStart + ppqPerSample * (double) n;
             double patternPos = std::fmod (ppq, patternLengthPpq);
             if (patternPos < 0)
@@ -233,7 +242,7 @@ public:
                     continue;
 
                 const bool shouldBeActive = (l == activeBufferLane);
-                updateLaneLifecycle (st, effect, shouldBeActive, stepIndex, capture, stepLenSamplesEstimate);
+                updateLaneLifecycle (st, effect, shouldBeActive, stepIndex, capture, stepLenSamplesEstimate, nowAbs);
 
                 if (st.gain > 0.0f)
                 {
@@ -241,7 +250,7 @@ public:
                     for (int c = 0; c < chCount; ++c)
                         wet[c] = working[c];
 
-                    effect->processSample (capture, wet, chCount, stepPhase);
+                    effect->processSample (capture, wet, chCount, stepPhase, nowAbs);
 
                     // Equal-power crossfade curve (rather than linear) so that a hand-off between
                     // two buffer lanes (one fading out while another fades in on the same sample
@@ -264,7 +273,7 @@ public:
                     continue;
 
                 const bool shouldBeActive = textureActive[(size_t) l];
-                updateLaneLifecycle (st, effect, shouldBeActive, stepIndex, capture, stepLenSamplesEstimate);
+                updateLaneLifecycle (st, effect, shouldBeActive, stepIndex, capture, stepLenSamplesEstimate, nowAbs);
 
                 if (st.gain > 0.0f)
                 {
@@ -272,7 +281,7 @@ public:
                     for (int c = 0; c < chCount; ++c)
                         wet[c] = working[c];
 
-                    effect->processSample (capture, wet, chCount, stepPhase);
+                    effect->processSample (capture, wet, chCount, stepPhase, nowAbs);
 
                     for (int c = 0; c < chCount; ++c)
                         working[c] = working[c] + st.gain * (wet[c] - working[c]);
@@ -297,22 +306,53 @@ private:
     };
 
     void updateLaneLifecycle (LaneRuntimeState& st, LaneEffect* effect, bool shouldBeActive,
-                               int stepIndex, const CaptureBuffer& capture, int stepLenSamples)
+                               int stepIndex, const CaptureBuffer& capture, int stepLenSamples,
+                               juce::int64 nowAbs)
     {
         if (shouldBeActive && ! st.active)
         {
-            // Trigger start
+            // Trigger start of a new ON run.
             st.active = true;
             st.currentStep = stepIndex;
             st.fadeDirection = 1;
-            effect->onStepStart (capture, stepLenSamples);
+            effect->onStepStart (capture, stepLenSamples, nowAbs);
         }
         else if (shouldBeActive && st.active && st.currentStep != stepIndex)
         {
-            // Re-trigger on new step (retain crossfade smoothness by fading through)
+            // Crossing a step boundary while continuously active (same lane ON on two
+            // consecutive steps). Whether this re-latches the effect's anchor/envelope depends
+            // on its RetriggerPolicy:
+            //  - RetriggerEachStep (e.g. Stutter): re-trigger every step, as before.
+            //  - ContinueThroughRun (e.g. TapeStop/TapeStart): only re-trigger when this step
+            //    does NOT immediately continue the previous one (i.e. there was a gap / this is
+            //    genuinely a fresh run) -- but updateLaneLifecycle is only reached here when
+            //    shouldBeActive && st.active, which by construction means the run is unbroken
+            //    (a broken run would have gone through the "! shouldBeActive" fade-out branch
+            //    and reset st.active to false in advanceFade). So for ContinueThroughRun lanes,
+            //    a step-boundary crossing while still active means "keep going" -- do not
+            //    call onStepStart again, just update the step index for stepPhase bookkeeping.
             st.currentStep = stepIndex;
+            if (effect->getRetriggerPolicy() == RetriggerPolicy::RetriggerEachStep)
+            {
+                st.fadeDirection = 1;
+                effect->onStepStart (capture, stepLenSamples, nowAbs);
+            }
+            else if (st.fadeDirection < 0)
+            {
+                // ContinueThroughRun lane re-activated while still fading out (possible when the
+                // ~5ms crossfade outlasts a whole step at extreme BPM, or on live pattern
+                // edits): cancel the fade-out and ramp the gain back in WITHOUT re-latching the
+                // envelope/anchor via onStepStart -- otherwise the lane would silently finish
+                // fading to zero and deactivate even though its step is ON.
+                st.fadeDirection = 1;
+            }
+        }
+        else if (shouldBeActive && st.active && st.fadeDirection < 0)
+        {
+            // Re-activated within the same step while fading out (e.g. a live pattern edit
+            // toggling the step off and back on mid-step): recover the gain ramp; the effect's
+            // internal state is still valid, no re-latch needed.
             st.fadeDirection = 1;
-            effect->onStepStart (capture, stepLenSamples);
         }
         else if (! shouldBeActive && st.active && st.fadeDirection >= 0)
         {

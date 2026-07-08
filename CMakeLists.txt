@@ -75,3 +75,9 @@ target_link_libraries(Stutter
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+# ---- Offline DSP verification harness (optional, not part of the shipped plugin) ----
+option(STUTTER_BUILD_TESTS "Build the offline render_test verification harness" OFF)
+if (STUTTER_BUILD_TESTS)
+    add_subdirectory(tools/render_test)
+endif()

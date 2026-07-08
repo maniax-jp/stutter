@@ -29,9 +29,9 @@ public:
             v = 0.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples) override
+    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture, stepLengthSamples);
+        juce::ignoreUnused (capture, stepLengthSamples, nowAbs);
         bitDepth = juce::jlimit (1.0f, 16.0f, getParam (ID::crushBitDepth, 16.0f));
         const float rateDivParam = juce::jlimit (0.0f, 1.0f, getParam (ID::crushRateDiv, 0.0f));
         // rateDiv 0..1 maps to hold length 1..40 samples (downsample factor)
@@ -39,9 +39,10 @@ public:
         holdCounter = 0;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
+                         juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture, progress);
+        juce::ignoreUnused (capture, progress, nowAbs);
 
         const bool sampleNow = (holdCounter % holdLength) == 0;
         const float levels = std::pow (2.0f, bitDepth) - 1.0f;

@@ -28,47 +28,57 @@ public:
 
     void reset() override
     {
-        samplesAgoAtStart = sampleRate * 0.5;
-        readOffsetSamples = 0.0;
         elapsedSamples = 0.0;
         durationSamples = sampleRate * 0.5;
         curveAmount = 0.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples) override
+    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
     {
-        juce::ignoreUnused (capture);
+        juce::ignoreUnused (capture, nowAbs);
         curveAmount = getParam (ID::tapeStartCurve, 0.5f);
         const float timeParam = getParam (ID::tapeStartTime, 0.5f);
         const double scale = 0.25 + timeParam * 2.75;
         durationSamples = juce::jmax (256.0, stepLengthSamples * scale);
-
-        // Start reading from "durationSamples ago" so that ramping forward at speed
-        // (which reduces samplesAgo over time) reaches "now" (samplesAgo = stepLengthSamples)
-        // roughly as the step region ends.
-        samplesAgoAtStart = durationSamples;
-        readOffsetSamples = 0.0;
         elapsedSamples = 0.0;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
+                         juce::int64 nowAbs) override
     {
         juce::ignoreUnused (progress);
 
         const double t = juce::jlimit (0.0, 1.0, elapsedSamples / durationSamples);
-        const double speed = speedForT (t);
 
-        const double samplesAgo = juce::jmax (0.0, samplesAgoAtStart - readOffsetSamples);
+        // absPos is defined directly as a position curve of t, referenced against the *current*
+        // nowAbs every sample (not a fixed anchor latched once in onStepStart): gapT(t) is the
+        // "samples behind now" gap, shrinking from durationSamples at t=0 to exactly 0 at t=1 by
+        // construction, so playback is guaranteed to land exactly on nowAbs when the spin-up
+        // completes -- no discontinuity at the handoff to real-time tracking. (Integrating a
+        // speed curve instead, as a moving read offset accumulated sample-by-sample, would
+        // under-shoot durationSamples for any spin-up curve whose average speed is below 1.0 --
+        // true of every curve shape here -- causing a jump right when playback should already be
+        // back in sync.) Referencing live nowAbs (rather than a fixed onStepStart-time anchor)
+        // also means a ContinueThroughRun lane held on far longer than this buffer's ~2.5s
+        // history window naturally keeps tracking real-time audio instead of drifting into
+        // out-of-range territory that CaptureBuffer's clamp would have to silently reinterpret.
+        const double gapT = durationSamples * (1.0 - gapShapeForT (t));
+        const double absPos = (double) nowAbs - gapT;
         for (int c = 0; c < numCh; ++c)
-            channelSamples[c] = capture.readInterpolated (c, samplesAgo);
+            channelSamples[c] = capture.readInterpolatedAbsolute (c, absPos);
 
-        readOffsetSamples += speed;
         elapsedSamples += 1.0;
     }
 
+    // TapeStart's spin-up is a single directional envelope across the whole ON region, same
+    // reasoning as TapeStop: continue an unbroken run rather than restarting the ramp every 16th.
+    RetriggerPolicy getRetriggerPolicy() const noexcept override { return RetriggerPolicy::ContinueThroughRun; }
+
 private:
-    // t: 0..1 progress through spin-up. Returns instantaneous playback speed 0.0 -> 1.0.
-    double speedForT (double t) const
+    // t: 0..1 progress through spin-up. Returns the fraction of the "now" gap already closed
+    // (0 = still fully durationSamples behind, 1 = fully caught up) -- same curve shape the
+    // original implementation used for instantaneous speed, reused here as a position fraction.
+    double gapShapeForT (double t) const
     {
         const double linear = t;
         const double exponent = 1.0 + curveAmount * 4.0;
@@ -88,8 +98,6 @@ private:
     double sampleRate = 44100.0;
     int numChannels = 2;
 
-    double samplesAgoAtStart = 22050.0;
-    double readOffsetSamples = 0.0;
     double elapsedSamples = 0.0;
     double durationSamples = 22050.0;
     float curveAmount = 0.5f;
