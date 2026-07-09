@@ -30,6 +30,7 @@ private:
 
     void showPresetMenu();
     void showSaveDialog();
+    void confirmDeleteUserPreset (int presetIndex);
 
     StutterAudioProcessor& proc;
 
@@ -59,11 +60,22 @@ private:
     juce::ToggleButton seqToggle { "SEQ" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqAttachment;
 
-    // BPM / sync status
+    // Host sync on/off
+    juce::ToggleButton syncToggle { "SYNC" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> syncAttachment;
+
+    // BPM / sync status. When host sync is off (FREE / internal clock), the label becomes an
+    // editable text field bound to ID::internalBpm (double-click to type a new value, per
+    // juce::Label's built-in edit-on-double-click); while host-synced it just shows the
+    // live host BPM read-only and dimmed-uneditable.
     juce::Label bpmLabel;
     double lastShownBpm = -1.0;
     bool lastShownSynced = false;
     bool lastShownDirty = false;
+    bool bpmLabelBeingEdited = false;
+
+    void updateBpmEditableState (bool hostSynced);
+    void bpmLabelTextEdited();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HeaderBar)
 };

@@ -1,7 +1,9 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_data_structures/juce_data_structures.h>
+#include <atomic>
 #include <cmath>
+#include <mutex>
 #include <vector>
 #include "ParameterIDs.h"
 
@@ -46,35 +48,56 @@ public:
         be reset to "no-op" defaults (e.g. a preset that doesn't specify this curve at all). */
     void resetToDefault()
     {
+        const std::lock_guard<std::mutex> lock (writeMutex);
         points = { { 0.0f, neutralValue, 0.0f }, { 1.0f, neutralValue, 0.0f } };
-        enabled = true;
-        syncDivIndex = 4;
+        enabled.store (true, std::memory_order_relaxed);
+        syncDivIndex.store (4, std::memory_order_relaxed);
         bakeTable();
     }
 
     float getNeutralValue() const noexcept { return neutralValue; }
 
+    /** setPoints/applyPreset/fromValueTree (and resetToDefault above) can be called from either
+        the message thread (CurveEditor UI edits) or an arbitrary host thread (setStateInformation
+        is not guaranteed to be called on the message thread per the JUCE contract). writeMutex
+        serialises those *writer* calls against each other -- it is never touched by the audio
+        thread, so it has no bearing on real-time safety: getValueAtPhase/isEnabled/
+        getSyncDivision (the audio-thread-facing reads) remain lock-free, reading only atomics
+        and the lock-free double-buffered table. */
     void setPoints (std::vector<CurvePoint> newPoints)
     {
         if (newPoints.size() < 2)
             return;
         std::sort (newPoints.begin(), newPoints.end(),
                     [] (const CurvePoint& a, const CurvePoint& b) { return a.position < b.position; });
+
+        const std::lock_guard<std::mutex> lock (writeMutex);
         points = std::move (newPoints);
         bakeTable();
     }
 
-    const std::vector<CurvePoint>& getPoints() const noexcept { return points; }
+    /** Not safe to call concurrently with setPoints/applyPreset/fromValueTree/resetToDefault from
+        another thread while iterating the result (only reads under the same writer lock would be
+        safe for that); intended for message-thread-only UI use (CurveEditor), which is the only
+        current caller. */
+    std::vector<CurvePoint> getPoints() const
+    {
+        const std::lock_guard<std::mutex> lock (writeMutex);
+        return points;
+    }
 
-    void setEnabled (bool e) noexcept { enabled = e; }
-    bool isEnabled() const noexcept { return enabled; }
+    void setEnabled (bool e) noexcept { enabled.store (e, std::memory_order_relaxed); }
+    bool isEnabled() const noexcept { return enabled.load (std::memory_order_relaxed); }
 
-    void setSyncDivision (int divIndex) noexcept { syncDivIndex = divIndex; }
-    int getSyncDivision() const noexcept { return syncDivIndex; }
+    void setSyncDivision (int divIndex) noexcept { syncDivIndex.store (divIndex, std::memory_order_relaxed); }
+    int getSyncDivision() const noexcept { return syncDivIndex.load (std::memory_order_relaxed); }
 
-    /** Evaluate the baked table at phase 0..1 (wraps). Real-time safe. */
+    /** Evaluate the baked table at phase 0..1 (wraps). Real-time safe: reads only the currently-
+        published table half (acquire load of the index), never the one a UI-thread bake might be
+        writing into concurrently. */
     float getValueAtPhase (float phase) const noexcept
     {
+        const auto& table = tables[(size_t) activeTable.load (std::memory_order_acquire)];
         phase = phase - std::floor (phase);
         const float posF = phase * (float) (tableSize - 1);
         const int i0 = (int) posF;
@@ -127,11 +150,15 @@ public:
     }
 
     // ---- Persistence ----
+    /** Reads points/enabled/syncDivIndex under writeMutex since this can race with a concurrent
+        setPoints/applyPreset/fromValueTree call from another (non-audio) thread -- see the note
+        on writeMutex below. */
     juce::ValueTree toValueTree() const
     {
+        const std::lock_guard<std::mutex> lock (writeMutex);
         juce::ValueTree tree (ID::curveNode);
-        tree.setProperty (ID::propEnabled, enabled, nullptr);
-        tree.setProperty (ID::propSyncDiv, syncDivIndex, nullptr);
+        tree.setProperty (ID::propEnabled, enabled.load (std::memory_order_relaxed), nullptr);
+        tree.setProperty (ID::propSyncDiv, syncDivIndex.load (std::memory_order_relaxed), nullptr);
         for (auto& p : points)
         {
             juce::ValueTree pt (ID::pointNode);
@@ -147,7 +174,10 @@ public:
         doesn't include a Curves node, or is missing this particular curve's node), the curve is
         reset to its neutral default rather than left holding whatever the previously-loaded
         preset put there -- this is what guarantees preset switches never leave residue from the
-        prior state, even for presets authored/saved before a curve existed in their state. */
+        prior state, even for presets authored/saved before a curve existed in their state.
+        May be called from the message thread (CurveEditor-driven preset loads) or from whatever
+        thread the host calls setStateInformation() on (not guaranteed to be the message thread
+        per the JUCE contract) -- see writeMutex. */
     void fromValueTree (const juce::ValueTree& tree)
     {
         if (! tree.isValid())
@@ -155,9 +185,6 @@ public:
             resetToDefault();
             return;
         }
-
-        enabled = tree.getProperty (ID::propEnabled, true);
-        syncDivIndex = tree.getProperty (ID::propSyncDiv, 4);
 
         std::vector<CurvePoint> pts;
         for (int i = 0; i < tree.getNumChildren(); ++i)
@@ -173,25 +200,47 @@ public:
             }
         }
 
+        const std::lock_guard<std::mutex> lock (writeMutex);
+        enabled.store (tree.getProperty (ID::propEnabled, true), std::memory_order_relaxed);
+        syncDivIndex.store (tree.getProperty (ID::propSyncDiv, 4), std::memory_order_relaxed);
+
         if (pts.size() >= 2)
-            setPoints (std::move (pts));
+        {
+            std::sort (pts.begin(), pts.end(),
+                        [] (const CurvePoint& a, const CurvePoint& b) { return a.position < b.position; });
+            points = std::move (pts);
+        }
         else
         {
             // Tree was valid but had no usable point data -- still reset points to neutral so
             // we don't silently keep stale points from the previously-loaded preset.
             points = { { 0.0f, neutralValue, 0.0f }, { 1.0f, neutralValue, 0.0f } };
-            bakeTable();
         }
+        bakeTable();
     }
 
 private:
+    /** Bakes into the currently-INACTIVE table half, then publishes it by flipping activeTable
+        with a release store. Callers of getValueAtPhase() (audio thread) do an acquire load of
+        activeTable, so they either see the old, fully-baked table or the new, fully-baked table
+        -- never a half-written one. This is called from setPoints/applyPreset/fromValueTree/
+        resetToDefault, i.e. off the audio thread (UI edits, preset loads) -- but potentially from
+        either the message thread (CurveEditor) or whatever thread the host calls
+        setStateInformation() on, which need not be the same thread and are not mutually
+        exclusive per the JUCE contract. All callers of bakeTable() hold writeMutex, which
+        serialises those two writers against each other so only one bake (and one flip of
+        activeTable) happens at a time; the audio thread never touches writeMutex, so this has no
+        effect on RT safety -- it only ever blocks one non-RT writer thread against another. */
     void bakeTable()
     {
+        const int writeIndex = 1 - activeTable.load (std::memory_order_relaxed);
+        auto& table = tables[(size_t) writeIndex];
         for (int i = 0; i < tableSize; ++i)
         {
             const float phase = (float) i / (float) (tableSize - 1);
             table[(size_t) i] = evaluateAt (phase);
         }
+        activeTable.store (writeIndex, std::memory_order_release);
     }
 
     float evaluateAt (float phase) const
@@ -228,10 +277,29 @@ private:
         return a.value + shapedT * (b.value - a.value);
     }
 
+    // writeMutex serialises the *writer* side only: setPoints/applyPreset/fromValueTree/
+    // resetToDefault/toValueTree (points/enabled/syncDivIndex access + bakeTable()) can be
+    // called from the message thread (CurveEditor UI edits) or from whatever thread the host
+    // calls setStateInformation() from (JUCE does not guarantee this is the message thread), so
+    // without this lock two concurrent writers could race on `points` (non-atomic std::vector)
+    // or interleave bakeTable() calls into the same inactive table half. It is never acquired by
+    // the audio thread -- getValueAtPhase()/isEnabled()/getSyncDivision() stay lock-free -- so
+    // this cannot cause priority inversion or blocking on the RT thread; it only ever contends
+    // between two non-RT writer threads.
+    mutable std::mutex writeMutex;
     std::vector<CurvePoint> points;
-    std::array<float, tableSize> table {};
-    bool enabled = true;
-    int syncDivIndex = 4; // index into tempo-sync division table, default 1/4 bar or similar
+    // Double-buffered lookup table: bakeTable() always writes into the inactive half, then
+    // flips activeTable to publish it (see bakeTable()/getValueAtPhase() for the ordering
+    // contract). This lets UI-thread edits (setPoints/applyPreset/fromValueTree) rebake without
+    // ever exposing a partially-written table to the audio thread.
+    std::array<std::array<float, tableSize>, 2> tables {};
+    std::atomic<int> activeTable { 0 };
+    // enabled/syncDivIndex are read lock-free from the audio thread (isEnabled()/
+    // getSyncDivision()) and written under writeMutex from writer threads, so they're atomic
+    // (relaxed: each is an independent, self-contained flag/index -- no ordering is needed
+    // relative to the table publish, which is already handled by activeTable's acquire/release).
+    std::atomic<bool> enabled { true };
+    std::atomic<int> syncDivIndex { 4 }; // index into tempo-sync division table, default 1/4 bar or similar
     const float neutralValue; // flat value that makes this curve a no-op; 0.5 for Volume/Pan, 1.0 for Filter
 };
 

@@ -63,10 +63,26 @@ jobs:
           cmake -B "${BUILD_DIR}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DSTUTTER_COPY_PLUGIN=OFF
+            -DSTUTTER_COPY_PLUGIN=OFF \
+            -DSTUTTER_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build "${BUILD_DIR}" --config Release -j8
+
+      - name: Run render_test (offline DSP regression harness)
+        run: |
+          set -euo pipefail
+          RENDER_TEST_BIN="${BUILD_DIR}/tools/render_test/render_test"
+          if [[ ! -f "$RENDER_TEST_BIN" ]]; then
+            echo "::error::render_test binary not found at ${RENDER_TEST_BIN}"
+            exit 1
+          fi
+          RENDER_TEST_OUT="${RUNNER_TEMP}/render_test"
+          mkdir -p "$RENDER_TEST_OUT"
+          if ! "$RENDER_TEST_BIN" "$RENDER_TEST_OUT"; then
+            echo "::error::render_test reported failures (see log above)"
+            exit 1
+          fi
 
       - name: Verify universal binary (lipo)
         run: |
@@ -132,6 +148,39 @@ jobs:
           set -euo pipefail
           VST3_PATH="${BUILD_DIR}/Stutter_artefacts/Release/VST3/${PRODUCT_NAME}.vst3"
           pluginval --strictness-level 8 --validate "$VST3_PATH"
+
+      - name: Validate AU with auval
+        run: |
+          set -euo pipefail
+          AU_BUNDLE="${BUILD_DIR}/Stutter_artefacts/Release/AU/${PRODUCT_NAME}.component"
+          if [[ ! -d "$AU_BUNDLE" ]]; then
+            echo "::error::AU bundle not found at ${AU_BUNDLE}"
+            exit 1
+          fi
+
+          # auval only scans components registered under ~/Library/Audio/Plug-Ins/Components,
+          # so copy the freshly built bundle there and force Core Audio to re-scan (killing
+          # AudioComponentRegistrar makes it re-enumerate on the next auval launch).
+          AU_DEST_DIR="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$AU_DEST_DIR"
+          ditto "$AU_BUNDLE" "${AU_DEST_DIR}/${PRODUCT_NAME}.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+
+          # macos-14 GitHub Actions runners are known to lag registering newly copied AU
+          # components, so retry a few times before failing the job.
+          AUVAL_OK=false
+          for attempt in 1 2 3; do
+            if auval -v aufx Stt1 Manx; then
+              AUVAL_OK=true
+              break
+            fi
+            echo "auval attempt ${attempt} failed, retrying in 5s..."
+            sleep 5
+          done
+          if [[ "$AUVAL_OK" != "true" ]]; then
+            echo "::error::auval failed to validate the AU component (aufx Stt1 Manx) after 3 attempts"
+            exit 1
+          fi
 
       # --- Developer ID signing / notarization (template) ---
       # The import/codesign/notarize steps run only if the MACOS_CERT_P12

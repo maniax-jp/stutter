@@ -56,9 +56,9 @@ void BottomTabs::refreshAfterPresetLoad()
     // everything (including hidden tabs, cheaply, since JUCE skips painting invisible components
     // anyway) so that whichever curve/lane view the user is looking at picks up the new state.
     laneParamPanel.repaint();
-    volumeCurveEditor.repaint();
-    filterCurveEditor.repaint();
-    panCurveEditor.repaint();
+    volumeCurveEditor.refreshAfterPresetLoad();
+    filterCurveEditor.refreshAfterPresetLoad();
+    panCurveEditor.refreshAfterPresetLoad();
     repaint();
 }
 

@@ -260,6 +260,8 @@ void PresetManager::refreshUserPresets()
 
 juce::String PresetManager::getCurrentPresetName() const noexcept
 {
+    if (deletedCurrentPresetName.isNotEmpty())
+        return deletedCurrentPresetName;
     if (currentIndex >= 0 && currentIndex < (int) presets.size())
         return presets[(size_t) currentIndex].name;
     return "Init";
@@ -330,6 +332,7 @@ void PresetManager::loadPreset (int index)
 
     currentIndex = index;
     dirty = false;
+    deletedCurrentPresetName.clear();
 
     if (onPresetLoaded)
         onPresetLoaded();
@@ -339,6 +342,14 @@ void PresetManager::loadNext()
 {
     if (presets.empty())
         return;
+    // currentIndex == -1 (nothing selected, e.g. right after deleting the current user preset --
+    // see deleteUserPreset()) resumes from the front of the list rather than indexing with a
+    // negative value.
+    if (currentIndex < 0)
+    {
+        loadPreset (0);
+        return;
+    }
     loadPreset ((currentIndex + 1) % (int) presets.size());
 }
 
@@ -346,6 +357,12 @@ void PresetManager::loadPrevious()
 {
     if (presets.empty())
         return;
+    // currentIndex == -1 (see loadNext()) resumes from the back of the list.
+    if (currentIndex < 0)
+    {
+        loadPreset ((int) presets.size() - 1);
+        return;
+    }
     loadPreset ((currentIndex - 1 + (int) presets.size()) % (int) presets.size());
 }
 
@@ -369,6 +386,44 @@ void PresetManager::saveUserPreset (const juce::String& presetName)
     currentNameOverride = trimmed;
     rebuildPresetList();
     dirty = false;
+    deletedCurrentPresetName.clear();
+}
+
+bool PresetManager::deleteUserPreset (int index)
+{
+    if (index < 0 || index >= (int) presets.size())
+        return false;
+
+    const auto entry = presets[(size_t) index]; // copy: rebuildPresetList() below invalidates iterators/refs
+    if (entry.isFactory || ! entry.userFile.existsAsFile())
+        return false;
+
+    const bool wasCurrent = (index == currentIndex);
+    const bool deleted = entry.userFile.deleteFile();
+    if (! deleted)
+        return false;
+
+    rebuildPresetList();
+
+    if (wasCurrent)
+    {
+        // The named preset no longer exists on disk (and thus can't be found by name in the
+        // refreshed list), but keep showing its name -- don't yank the display to whatever
+        // preset happens to now occupy this index -- while marking the current state as
+        // unsaved/dirty, since it's no longer backed by a file.
+        deletedCurrentPresetName = entry.name;
+        dirty = true;
+
+        // rebuildPresetList()'s name-based re-find can't locate the now-deleted preset, so it
+        // clamps currentIndex to whatever neighbour now occupies that slot -- that would make
+        // getCurrentIndex() (and the preset-menu highlight) silently point at an unrelated
+        // preset that doesn't match deletedCurrentPresetName. Use -1 as an explicit
+        // "unselected" sentinel instead; getCurrentIndex()/loadNext()/loadPrevious() all treat
+        // -1 safely (see their comments).
+        currentIndex = -1;
+    }
+
+    return true;
 }
 
 } // namespace stutter

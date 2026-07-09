@@ -177,7 +177,6 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     dryScratchBuffer.setSize (dryScratchMaxChannels, dryScratchMaxSamples, false, true, true);
 
     internalClockPpq = 0.0;
-    wasHostPlaying = false;
 }
 
 void StutterAudioProcessor::releaseResources()
@@ -203,9 +202,10 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 {
     const bool hostSyncEnabled = apvts.getRawParameterValue (ID::hostSync)->load() > 0.5f;
 
-    double bpm = internalBpm.load (std::memory_order_relaxed);
+    sequencer.setEnabled (apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f);
+
+    double bpm = apvts.getRawParameterValue (ID::internalBpm)->load();
     double ppqAtBlockStart = internalClockPpq;
-    bool hostPlaying = false;
     bool usingHostSync = false;
 
     if (auto* playHead = getPlayHead())
@@ -213,7 +213,6 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
         if (auto position = playHead->getPosition())
         {
             const bool hostIsPlaying = position->getIsPlaying();
-            hostPlaying = hostIsPlaying;
 
             if (hostSyncEnabled && hostIsPlaying)
             {
@@ -242,7 +241,6 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 
     // Advance internal free-running clock for next block regardless (so it stays live when host stops)
     internalClockPpq = ppqAtBlockStart + ppqPerSample * (double) buffer.getNumSamples();
-    wasHostPlaying = hostPlaying;
 
     displayBpm.store (bpm, std::memory_order_relaxed);
     displayHostSynced.store (usingHostSync, std::memory_order_relaxed);
@@ -267,7 +265,6 @@ void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buf
     auto& filterCurve = curves[(size_t) ModTarget::Filter];
     auto& panCurve = curves[(size_t) ModTarget::Pan];
 
-    static const double syncDivisions[] = { 4.0, 2.0, 1.0, 0.5, 0.25, 0.125, 0.0625 }; // bars per cycle: 1/1..1/16 etc, index-based below
     auto cyclesPerPpqQuarter = [] (int syncIndex) -> double
     {
         // syncIndex maps 1/1 .. 1/16 bar-length cycles (in quarter notes: 1 bar = 4 quarter notes)
@@ -276,7 +273,6 @@ void StutterAudioProcessor::applyGlobalModulators (juce::AudioBuffer<float>& buf
         syncIndex = juce::jlimit (0, n - 1, syncIndex);
         return 1.0 / barFractionTable[syncIndex];
     };
-    juce::ignoreUnused (syncDivisions);
 
     for (int n = 0; n < numSamples; ++n)
     {
@@ -404,10 +400,52 @@ void StutterAudioProcessor::applyDryWetAndGain (const juce::AudioBuffer<float>& 
     }
 }
 
+void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
+{
+    // Capture the (dry) input into the always-on ring buffer. This must happen per-chunk (not
+    // once for the whole host block) because StepSequencer::processBlock() anchors its reads to
+    // CaptureBuffer::getTotalWritten() *immediately after* writing exactly this chunk's samples
+    // -- see the comment there. Writing the whole block up front and then processing chunks
+    // against it would leave every chunk but the last reading a stale/incorrect anchor.
+    captureBuffer.write (chunk);
+
+    // Keep an untouched copy of the dry signal for the final dry/wet mix. dryScratchBuffer is
+    // sized generously in prepareToPlay() and is never resized here (zero heap activity on the
+    // audio thread); processBlock() guarantees chunk never exceeds dryScratchBuffer's capacity
+    // (see the chunking loop there), so this copy always covers the chunk in full -- no sample
+    // is ever silently dropped, even when the host sends a block larger than it declared in
+    // prepareToPlay.
+    const int chunkChannels = chunk.getNumChannels();
+    const int chunkSamples = chunk.getNumSamples();
+    jassert (chunkChannels <= dryScratchMaxChannels && chunkSamples <= dryScratchMaxSamples);
+
+    for (int c = 0; c < chunkChannels; ++c)
+        dryScratchBuffer.copyFrom (c, 0, chunk, c, 0, chunkSamples);
+
+    juce::AudioBuffer<float> dryView (dryScratchBuffer.getArrayOfWritePointers(), chunkChannels, chunkSamples);
+
+    // 1. Transport sync + step sequencer (lane effects read from captureBuffer, write into `chunk`)
+    updateTransportAndSequence (chunk);
+
+    // 2. Global modulators (Volume / Filter / Pan curves)
+    applyGlobalModulators (chunk);
+
+    // 3. Dry/Wet mix + output gain
+    applyDryWetAndGain (dryView, chunk);
+}
+
 void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
     midiMessages.clear();
+
+    // dryScratchMaxSamples is only set (non-zero) by prepareToPlay(); dryScratchBuffer is sized
+    // from it, and processChunk()/the chunking loop below both assume it's a valid, non-zero
+    // capacity. Guard against a host calling processBlock() before prepareToPlay() (or after
+    // releaseResources() without a matching re-prepare) rather than dividing by / chunking into
+    // a zero-sized buffer.
+    if (dryScratchMaxSamples == 0)
+        return;
 
     const int totalNumInputChannels = getTotalNumInputChannels();
     const int totalNumOutputChannels = getTotalNumOutputChannels();
@@ -415,28 +453,30 @@ void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     for (int i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // 1. Capture the (dry) input into the always-on ring buffer
-    captureBuffer.write (buffer);
+    // dryScratchBuffer is allocated in prepareToPlay() for up to dryScratchMaxSamples and is
+    // never resized here (zero heap activity on the audio thread). If the host sends a block
+    // larger than that (blockSize increased after prepareToPlay, or a host that ignores the
+    // declared maximum), split it into dryScratchMaxSamples-sized chunks and run each one
+    // through the full chain (capture write -> transport/sequencer -> modulators -> dry/wet) in
+    // turn -- every sample still gets processed (no audio dropped), and each chunk's
+    // transport/PPQ advance continues exactly where the previous chunk left off
+    // (updateTransportAndSequence() advances the shared internalClockPpq member once per chunk,
+    // and lastKnownPpq/lastPpqPerSample carry the host-synced position forward the same way), so
+    // splitting a block into chunks is transparent to the sequencer/curve timeline.
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    const int chunkCapacity = juce::jmax (1, dryScratchMaxSamples);
 
-    // Keep an untouched copy of the dry signal for the final dry/wet mix. dryScratchBuffer is
-    // sized generously in prepareToPlay() and is never resized here (zero heap activity on the
-    // audio thread). If the host ever sends a bigger block than it declared in prepareToPlay,
-    // degrade gracefully by only copying/processing the samples that fit rather than resizing.
-    const int dryChannels = juce::jmin (buffer.getNumChannels(), dryScratchMaxChannels);
-    const int drySamples = juce::jmin (buffer.getNumSamples(), dryScratchMaxSamples);
-    jassert (dryChannels == buffer.getNumChannels() && drySamples == buffer.getNumSamples());
+    int offset = 0;
+    while (offset < numSamples)
+    {
+        const int n = juce::jmin (chunkCapacity, numSamples - offset);
 
-    for (int c = 0; c < dryChannels; ++c)
-        dryScratchBuffer.copyFrom (c, 0, buffer, c, 0, drySamples);
+        juce::AudioBuffer<float> chunk (buffer.getArrayOfWritePointers(), numChannels, offset, n);
+        processChunk (chunk);
 
-    // 2. Transport sync + step sequencer (lane effects read from captureBuffer, write into `buffer`)
-    updateTransportAndSequence (buffer);
-
-    // 3. Global modulators (Volume / Filter / Pan curves)
-    applyGlobalModulators (buffer);
-
-    // 4. Dry/Wet mix + output gain
-    applyDryWetAndGain (dryScratchBuffer, buffer);
+        offset += n;
+    }
 }
 
 //==============================================================================

@@ -32,7 +32,8 @@ public:
     StepSequencer()
     {
         for (auto& lane : steps)
-            lane.fill (false);
+            for (auto& s : lane)
+                s.store (false, std::memory_order_relaxed);
     }
 
     void setLaneEffect (int laneIndex, std::unique_ptr<LaneEffect> effect)
@@ -60,7 +61,6 @@ public:
             s.gain = 0.0f;
         }
 
-        freeRunPpq = 0.0;
         reset();
     }
 
@@ -82,14 +82,14 @@ public:
     {
         if (lane < 0 || lane >= numLanes || step < 0 || step >= numSteps)
             return false;
-        return steps[(size_t) lane][(size_t) step];
+        return steps[(size_t) lane][(size_t) step].load (std::memory_order_relaxed);
     }
 
     void setStep (int lane, int step, bool on) noexcept
     {
         if (lane < 0 || lane >= numLanes || step < 0 || step >= numSteps)
             return;
-        steps[(size_t) lane][(size_t) step] = on;
+        steps[(size_t) lane][(size_t) step].store (on, std::memory_order_relaxed);
     }
 
     void setEnabled (bool e) noexcept { sequencerEnabled = e; }
@@ -110,7 +110,7 @@ public:
             {
                 juce::ValueTree stepTree (ID::stepNode);
                 stepTree.setProperty (ID::propIndex, s, nullptr);
-                stepTree.setProperty (ID::propOn, steps[(size_t) l][(size_t) s], nullptr);
+                stepTree.setProperty (ID::propOn, steps[(size_t) l][(size_t) s].load (std::memory_order_relaxed), nullptr);
                 laneTree.appendChild (stepTree, nullptr);
             }
             tree.appendChild (laneTree, nullptr);
@@ -127,7 +127,8 @@ public:
     void fromValueTree (const juce::ValueTree& tree)
     {
         for (auto& lane : steps)
-            lane.fill (false);
+            for (auto& s : lane)
+                s.store (false, std::memory_order_relaxed);
 
         if (! tree.isValid())
             return;
@@ -149,7 +150,7 @@ public:
                 const int s = stepTree.getProperty (ID::propIndex, -1);
                 if (s < 0 || s >= numSteps)
                     continue;
-                steps[(size_t) l][(size_t) s] = (bool) stepTree.getProperty (ID::propOn, false);
+                steps[(size_t) l][(size_t) s].store ((bool) stepTree.getProperty (ID::propOn, false), std::memory_order_relaxed);
             }
         }
     }
@@ -219,7 +220,7 @@ public:
 
             for (int l = 0; l < numLanes; ++l)
             {
-                if (! steps[(size_t) l][(size_t) stepIndex] || laneEffects[(size_t) l] == nullptr)
+                if (! steps[(size_t) l][(size_t) stepIndex].load (std::memory_order_relaxed) || laneEffects[(size_t) l] == nullptr)
                     continue;
 
                 if (laneEffects[(size_t) l]->getCategory() == LaneCategory::Buffer)
@@ -292,8 +293,13 @@ public:
 
                     effect->processSample (capture, wet, chCount, stepPhase, nowAbs);
 
+                    // Equal-power crossfade curve (same sin() taper as the Buffer-lane hand-off
+                    // above), rather than a linear st.gain blend: keeps the summed power roughly
+                    // constant through the fade in/out instead of dipping, avoiding an audible
+                    // level ripple when a Gate/Filter/Crush texture lane engages or disengages.
+                    const float eqPowerGain = std::sin (st.gain * juce::MathConstants<float>::halfPi);
                     for (int c = 0; c < chCount; ++c)
-                        working[c] = working[c] + st.gain * (wet[c] - working[c]);
+                        working[c] = working[c] + eqPowerGain * (wet[c] - working[c]);
                 }
 
                 advanceFade (st, effect);
@@ -401,7 +407,11 @@ private:
         }
     }
 
-    std::array<std::array<bool, numSteps>, numLanes> steps {};
+    // relaxed load/store is sufficient here: step on/off is UI-authored boolean state with no
+    // dependent data that needs to be published alongside it (unlike e.g. CaptureBuffer's
+    // writePos, which guards actual sample data). Worst case under a race is reading a step
+    // value one block stale, which is inaudible and self-corrects on the next block.
+    std::array<std::array<std::atomic<bool>, numSteps>, numLanes> steps {};
     std::array<std::unique_ptr<LaneEffect>, numLanes> laneEffects;
     std::array<LaneRuntimeState, numLanes> laneState;
 
@@ -409,7 +419,6 @@ private:
     int numChannels = 2;
     int crossfadeSamples = 220; // ~5ms @44.1k
     bool sequencerEnabled = true;
-    double freeRunPpq = 0.0;
 
     std::atomic<int> playheadStep { -1 };
 };

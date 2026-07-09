@@ -62,7 +62,7 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
 ## プリセットシステム(必須)
 - ファクトリープリセットを **24個以上** 内蔵。カテゴリ: Stutter系 / Tape系 / Gate・Sidechain系 / Glitch(複合)系 / Filter・Texture系
 - 各プリセットは全状態(ステップグリッド、レーンパラメータ、カーブ、Mix)を含む
-- 実装: プリセットはJSON(またはValueTree XML)としてBinaryDataに埋め込み。ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/` に保存/読込
+- 実装: ファクトリープリセットは `src/FactoryPresets.cpp` 内で各プリセットの定義(パラメータ値・ステップ・カーブ)を C++ コードとして直接記述し(`FactoryPresetDef` 構造体)、`PresetManager` がロード時にそれを ValueTree へ変換する(JSON/XML の BinaryData 埋め込みではない)。ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/` に保存/読込
 - UI: ヘッダーバーにプリセットブラウザ(前後ボタン+名前クリックでリスト表示、Save ボタン)
 - 良いプリセット例: "Classic Stutter Build"(小節後半にレート漸増スタッター)、"Tape Drop"(4拍目にテープストップ)、"Sidechain Pump"(Volumeカーブでダッキング)、"Glitch Storm"(複合)、"Trance Gate 16th" など、音楽的に実用的なもの
 
@@ -168,6 +168,9 @@ Curves
 
 上記の「パラメータ + Sequencer + Curves」を1つの ValueTree にまとめたものが
 そのままプリセット1個分のデータになる(`getStateInformation` が返すXMLと同一形式)。
-フェーズ2のプリセットブラウザは、この完全な状態スナップショットをプリセット名と
-紐づけて保存/読込すればよい(BinaryData埋め込みのファクトリープリセット、
-`~/Library/Audio/Presets/Maniax/Stutter/` のユーザープリセットとも同一シリアライズ経路を再利用可能)。
+プリセットブラウザは、この完全な状態スナップショットをプリセット名と紐づけて保存/読込する。
+ファクトリープリセットは `src/FactoryPresets.cpp` 内で `FactoryPresetDef` 構造体として
+C++ コードで直接定義し、`PresetManager` がロード時にそれを ValueTree に変換する。
+`~/Library/Audio/Presets/Maniax/Stutter/` のユーザープリセットは同じ ValueTree を XML
+シリアライズしてディスクに保存したもので、どちらも同一のデータ構造・同一のロード経路
+(`PresetManager`)を再利用している。

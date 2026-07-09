@@ -22,6 +22,12 @@ public:
     explicit CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget target, juce::Colour accent);
     ~CurveEditor() override;
 
+    /** Called by BottomTabs::refreshAfterPresetLoad() right after a preset finishes loading, so
+        the sync-division combo box (which isn't an APVTS-bound control, since syncDiv lives in
+        the Curves structural ValueTree, not a parameter) picks up the newly-loaded value
+        immediately rather than waiting for the next timer poll. */
+    void refreshAfterPresetLoad() { refreshSyncDivCombo(); repaint(); }
+
     void paint (juce::Graphics&) override;
     void resized() override;
 
@@ -33,6 +39,11 @@ public:
 
 private:
     void timerCallback() override;
+
+    /** Re-syncs syncDivCombo's selected item from curve().getSyncDivision() without firing
+        onChange (used on construction, on the timer poll, and explicitly right after a preset
+        load via BottomTabs::refreshAfterPresetLoad -> CurveEditor::refreshAfterPresetLoad). */
+    void refreshSyncDivCombo();
 
     stutter::CurveModulator& curve() const;
 
@@ -51,6 +62,7 @@ private:
 
     juce::TextButton enableButton { "ON" };
     std::vector<std::unique_ptr<juce::TextButton>> presetButtons;
+    juce::ComboBox syncDivCombo;
 
     // interaction state
     int draggingPointIndex = -1;

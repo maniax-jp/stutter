@@ -12,6 +12,11 @@ constexpr float hitRadius = 11.0f;
 
 const char* presetNames[] = { "SawDown", "SawUp", "Sine", "Square", "SidechainDuck", "Steps" };
 const char* presetLabels[] = { "Saw Dn", "Saw Up", "Sine", "Square", "Duck", "Steps" };
+
+// Sync-division choices, index-matched to CurveModulator::syncDivIndex / the barFractionTable in
+// PluginProcessor.cpp's cyclesPerPpqQuarter() (0=1/1 .. 4=1/16 bar-length cycles). Combo box item
+// IDs are 1-based (JUCE convention: 0 means "no selection"), so item ID == syncDivIndex + 1.
+const char* syncDivLabels[] = { "1/1", "1/2", "1/4", "1/8", "1/16" };
 }
 
 CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget target, juce::Colour accent)
@@ -42,6 +47,22 @@ CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget t
         presetButtons.push_back (std::move (btn));
     }
 
+    for (int i = 0; i < (int) (sizeof (syncDivLabels) / sizeof (syncDivLabels[0])); ++i)
+        syncDivCombo.addItem (syncDivLabels[i], i + 1);
+    syncDivCombo.onChange = [this]
+    {
+        const int newIndex = syncDivCombo.getSelectedId() - 1;
+        if (newIndex < 0)
+            return;
+        if (newIndex == curve().getSyncDivision())
+            return;
+        curve().setSyncDivision (newIndex);
+        proc.getPresetManager().markDirty();
+        repaint();
+    };
+    addAndMakeVisible (syncDivCombo);
+    refreshSyncDivCombo();
+
     startTimerHz (30);
 }
 
@@ -49,12 +70,22 @@ CurveEditor::~CurveEditor() { stopTimer(); }
 
 stutter::CurveModulator& CurveEditor::curve() const { return proc.getCurve (modTarget); }
 
+void CurveEditor::refreshSyncDivCombo()
+{
+    const int id = curve().getSyncDivision() + 1;
+    if (syncDivCombo.getSelectedId() != id)
+        syncDivCombo.setSelectedId (id, juce::dontSendNotification);
+}
+
 void CurveEditor::timerCallback()
 {
-    // Keep the enable button in sync if state changes elsewhere (e.g. preset load).
+    // Keep the enable button / sync-div combo in sync if state changes elsewhere (e.g. preset
+    // load via a path that doesn't go through refreshAfterPresetLoad, or future automation).
     const bool en = curve().isEnabled();
     if (enableButton.getToggleState() != en)
         enableButton.setToggleState (en, juce::dontSendNotification);
+
+    refreshSyncDivCombo();
 }
 
 juce::Rectangle<float> CurveEditor::getPlotArea() const
@@ -357,6 +388,9 @@ void CurveEditor::resized()
     auto toolbar = getLocalBounds().removeFromTop (36).reduced (10, 6);
     enableButton.setBounds (toolbar.removeFromLeft (44));
     toolbar.removeFromLeft (10);
+
+    syncDivCombo.setBounds (toolbar.removeFromRight (64));
+    toolbar.removeFromRight (10);
 
     const int n = (int) presetButtons.size();
     if (n > 0)

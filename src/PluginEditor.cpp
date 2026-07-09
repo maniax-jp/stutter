@@ -41,6 +41,12 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
 
 StutterAudioProcessorEditor::~StutterAudioProcessorEditor()
 {
+    // The processor (and its PresetManager) can outlive this editor -- the host is free to
+    // destroy/recreate the editor at any time while the processor stays alive. Clear the
+    // callback so a preset load that happens after this editor is gone never invokes a
+    // dangling `this` (see docs/ISSUES.md 3.3).
+    processorRef.getPresetManager().onPresetLoaded = nullptr;
+
     setLookAndFeel (nullptr);
 }
 

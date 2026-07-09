@@ -61,6 +61,13 @@ public:
         and selects it as current. */
     void saveUserPreset (const juce::String& presetName);
 
+    /** Deletes the user preset at the given index (must be a non-factory entry; a no-op
+        otherwise) from disk, then refreshes the list. If the deleted preset was the current
+        one, the current name is preserved (via currentNameOverride) so the browser keeps
+        showing its name -- but marked dirty, since that named preset no longer exists on disk
+        and the current in-memory state is now unsaved. Returns true if a file was deleted. */
+    bool deleteUserPreset (int index);
+
     static juce::File getUserPresetDirectory();
 
     /** Called (on the message thread) whenever a preset finishes loading, so the editor can
@@ -89,6 +96,12 @@ private:
     bool dirty = false;
     bool applyingPreset = false;
     juce::String currentNameOverride; // used right after saving, before rebuildPresetList() catches up
+
+    // Set when the *current* user preset is deleted: its name no longer appears anywhere in
+    // `presets`, so getCurrentPresetName() can't find it by index lookup any more. Keeps the
+    // browser showing the just-deleted name (now unsaved/dirty) until the user loads/saves a
+    // different preset. Cleared by loadPreset()/saveUserPreset().
+    juce::String deletedCurrentPresetName;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PresetManager)
 };

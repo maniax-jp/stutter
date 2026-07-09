@@ -59,10 +59,6 @@ public:
 
     stutter::PresetManager& getPresetManager() noexcept { return *presetManager; }
 
-    /** Current internal free-running clock BPM (used when host transport is stopped/not available). */
-    double getInternalBpm() const noexcept { return internalBpm.load (std::memory_order_relaxed); }
-    void setInternalBpm (double bpm) noexcept { internalBpm.store (bpm, std::memory_order_relaxed); }
-
     /** For UI: current effective BPM/PPQ/playhead-step, updated once per block. Lock-free reads. */
     double getDisplayBpm() const noexcept { return displayBpm.load (std::memory_order_relaxed); }
     bool isDisplayHostSynced() const noexcept { return displayHostSynced.load (std::memory_order_relaxed); }
@@ -84,6 +80,11 @@ private:
     void updateTransportAndSequence (juce::AudioBuffer<float>& buffer);
     void applyGlobalModulators (juce::AudioBuffer<float>& buffer);
     void applyDryWetAndGain (const juce::AudioBuffer<float>& dryBuffer, juce::AudioBuffer<float>& wetBuffer);
+
+    /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
+        modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
+        split into successive calls to this. */
+    void processChunk (juce::AudioBuffer<float>& chunk);
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -135,8 +136,6 @@ private:
     double lastKnownPpq = 0.0;
     double lastPpqPerSample = 0.0;
     double internalClockPpq = 0.0;
-    bool wasHostPlaying = false;
-    std::atomic<double> internalBpm { 120.0 };
 
     std::atomic<double> displayBpm { 120.0 };
     std::atomic<bool> displayHostSynced { false };

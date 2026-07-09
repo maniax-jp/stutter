@@ -137,6 +137,17 @@ void setAllStepsOn (stutter::StepSequencer& seq, int lane)
         seq.setStep (lane, s, true);
 }
 
+// internalBpm is APVTS-owned (see docs/ISSUES.md 2.2); processBlock reads it via
+// getRawParameterValue(), so tests must set it the same way a host/preset would.
+void setInternalBpm (StutterAudioProcessor& processor, double bpm)
+{
+    if (auto* param = processor.getAPVTS().getParameter (stutter::ID::internalBpm))
+    {
+        const auto& range = processor.getAPVTS().getParameterRange (stutter::ID::internalBpm);
+        param->setValueNotifyingHost (range.convertTo0to1 ((float) bpm));
+    }
+}
+
 double rmsOf (const juce::AudioBuffer<float>& buf)
 {
     double sumSq = 0.0;
@@ -181,7 +192,7 @@ bool testFreshInstanceIsTransparent()
 
     auto& apvts = processor.getAPVTS();
     apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
-    processor.setInternalBpm (kBpm);
+    setInternalBpm (processor, kBpm);
     // Sequencer stays fully OFF (freshly constructed) -- we're isolating the global
     // Volume/Filter/Pan curve modulators, which run regardless of the step sequencer.
 
@@ -399,6 +410,206 @@ bool testMalformedCurveTreeFixtures()
     return pass;
 }
 
+// (d) sequencerOn == false must silence step effects entirely (output matches dry passthrough)
+// while the global Volume/Filter/Pan curve modulators keep running -- this is the "bypass ==
+// curve-only" contract from SPEC (docs/ISSUES.md 2.1). Drives a lane with all 16 steps ON (which
+// would otherwise audibly alter the signal) plus a non-neutral, enabled Volume curve, with
+// sequencerOn set to false via the APVTS parameter (the only supported way to reach the DSP, per
+// 2.1/2.2's "APVTS is the single source of truth" fix).
+bool testSequencerOffBypassesStepsButCurvesStillWork()
+{
+    printf ("\n[Test D] sequencerOn=false silences step lanes (dry match) while curves still modulate\n");
+    bool pass = true;
+
+    // --- D1: sequencerOn=false -> output must equal dry passthrough, even with a lane fully ON ---
+    {
+        StutterAudioProcessor processor;
+        processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+        processor.prepareToPlay (kSampleRate, kBlockSize);
+
+        auto& apvts = processor.getAPVTS();
+        apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
+        setInternalBpm (processor, kBpm);
+        apvts.getParameter (stutter::ID::sequencerOn)->setValueNotifyingHost (0.0f); // OFF
+
+        // Make sure the Volume curve is neutral for this sub-test, isolating the step-lane bypass.
+        processor.getCurve (stutter::ModTarget::Volume).resetToDefault();
+        processor.getCurve (stutter::ModTarget::Filter).resetToDefault();
+        processor.getCurve (stutter::ModTarget::Pan).resetToDefault();
+
+        auto& seq = processor.getSequencer();
+        setAllStepsOn (seq, StutterAudioProcessor::laneStutter); // would be very audible if not bypassed
+
+        const int totalSamples = (int) std::round (1.5 * kSampleRate);
+        juce::AudioBuffer<float> source (2, totalSamples);
+        fillTestSignal (source, kSampleRate, kBpm);
+
+        juce::AudioBuffer<float> rendered (2, totalSamples);
+        rendered.clear();
+
+        int pos = 0;
+        juce::MidiBuffer midi;
+        while (pos < totalSamples)
+        {
+            const int n = juce::jmin (kBlockSize, totalSamples - pos);
+            juce::AudioBuffer<float> block (2, kBlockSize);
+            block.clear();
+            for (int c = 0; c < 2; ++c)
+                block.copyFrom (c, 0, source, c, pos, n);
+
+            midi.clear();
+            processor.processBlock (block, midi);
+
+            for (int c = 0; c < 2; ++c)
+                rendered.copyFrom (c, pos, block, c, 0, n);
+            pos += n;
+        }
+
+        double maxAbsDiff = 0.0;
+        for (int c = 0; c < 2; ++c)
+        {
+            const float* d = source.getReadPointer (c);
+            const float* w = rendered.getReadPointer (c);
+            for (int i = 0; i < totalSamples; ++i)
+                maxAbsDiff = juce::jmax (maxAbsDiff, (double) std::abs (d[i] - w[i]));
+        }
+
+        printf ("  D1: sequencerOn=false, lane fully ON -> maxAbsDiff vs dry = %.6f\n", maxAbsDiff);
+        if (maxAbsDiff > 1.0e-6)
+        {
+            printf ("  FAIL: expected exact dry passthrough (step lanes fully bypassed) when sequencerOn=false\n");
+            pass = false;
+        }
+    }
+
+    // --- D2: with sequencerOn=false, the Volume curve modulator must still audibly modulate ---
+    {
+        StutterAudioProcessor processor;
+        processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+        processor.prepareToPlay (kSampleRate, kBlockSize);
+
+        auto& apvts = processor.getAPVTS();
+        apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
+        setInternalBpm (processor, kBpm);
+        apvts.getParameter (stutter::ID::sequencerOn)->setValueNotifyingHost (0.0f); // OFF
+
+        // Non-neutral, enabled Volume curve: SidechainDuck dips well below unity gain.
+        auto& volumeCurve = processor.getCurve (stutter::ModTarget::Volume);
+        volumeCurve.setEnabled (true);
+        volumeCurve.applyPreset ("SidechainDuck");
+        volumeCurve.setSyncDivision (2); // 1/4 bar per cycle, several cycles within the render
+
+        auto& seq = processor.getSequencer();
+        // Sequencer left fully OFF pattern-wise too (irrelevant since sequencerOn gates it anyway).
+        juce::ignoreUnused (seq);
+
+        const int totalSamples = (int) std::round (2.0 * kSampleRate);
+        juce::AudioBuffer<float> source (2, totalSamples);
+        fillTestSignal (source, kSampleRate, kBpm);
+
+        juce::AudioBuffer<float> rendered (2, totalSamples);
+        rendered.clear();
+
+        int pos = 0;
+        juce::MidiBuffer midi;
+        while (pos < totalSamples)
+        {
+            const int n = juce::jmin (kBlockSize, totalSamples - pos);
+            juce::AudioBuffer<float> block (2, kBlockSize);
+            block.clear();
+            for (int c = 0; c < 2; ++c)
+                block.copyFrom (c, 0, source, c, pos, n);
+
+            midi.clear();
+            processor.processBlock (block, midi);
+
+            for (int c = 0; c < 2; ++c)
+                rendered.copyFrom (c, pos, block, c, 0, n);
+            pos += n;
+        }
+
+        double maxAbsDiff = 0.0;
+        for (int c = 0; c < 2; ++c)
+        {
+            const float* d = source.getReadPointer (c);
+            const float* w = rendered.getReadPointer (c);
+            for (int i = 0; i < totalSamples; ++i)
+                maxAbsDiff = juce::jmax (maxAbsDiff, (double) std::abs (d[i] - w[i]));
+        }
+
+        printf ("  D2: sequencerOn=false, SidechainDuck Volume curve -> maxAbsDiff vs dry = %.6f\n", maxAbsDiff);
+        if (maxAbsDiff < 0.05)
+        {
+            printf ("  FAIL: expected the Volume curve modulator to audibly duck the signal even with sequencerOn=false\n");
+            pass = false;
+        }
+    }
+
+    printf ("  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// (e) internalBpm is APVTS-owned (2.2): changing it via the APVTS parameter must change the
+// free-running playhead's advance speed. Renders a fixed number of samples at two different
+// internalBpm values (hostSync off, transport free-running) and checks the sequencer's
+// playhead-step count advances proportionally faster at the higher BPM.
+bool testApvtsInternalBpmChangesFreeRunSpeed()
+{
+    printf ("\n[Test E] APVTS internalBpm change alters free-running playhead speed\n");
+
+    auto renderAndCountStepAdvances = [] (double bpm) -> int
+    {
+        StutterAudioProcessor processor;
+        processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+        processor.prepareToPlay (kSampleRate, kBlockSize);
+
+        auto& apvts = processor.getAPVTS();
+        apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f); // force free-run
+        setInternalBpm (processor, bpm);
+
+        auto& seq = processor.getSequencer();
+        setAllStepsOn (seq, StutterAudioProcessor::laneGate); // any lane; only playhead advance matters
+
+        const int totalSamples = (int) std::round (2.0 * kSampleRate);
+        juce::AudioBuffer<float> block (2, kBlockSize);
+        juce::MidiBuffer midi;
+
+        int lastStep = -1;
+        int advances = 0;
+        int pos = 0;
+        while (pos < totalSamples)
+        {
+            const int n = juce::jmin (kBlockSize, totalSamples - pos);
+            block.setSize (2, n, false, false, true);
+            block.clear();
+
+            midi.clear();
+            processor.processBlock (block, midi);
+
+            const int step = seq.getCurrentPlayheadStep();
+            if (lastStep >= 0 && step != lastStep)
+                ++advances;
+            lastStep = step;
+
+            pos += n;
+        }
+        return advances;
+    };
+
+    const int advancesAtBaseBpm = renderAndCountStepAdvances (kBpm);
+    const int advancesAtDoubleBpm = renderAndCountStepAdvances (kBpm * 2.0);
+
+    printf ("  step advances @ %.0f BPM = %d, @ %.0f BPM = %d\n",
+            kBpm, advancesAtBaseBpm, kBpm * 2.0, advancesAtDoubleBpm);
+
+    // At double the BPM the playhead should cross roughly twice as many step boundaries in the
+    // same wall-clock render (allow generous tolerance for edge effects at start/end of render).
+    const bool pass = advancesAtDoubleBpm > advancesAtBaseBpm * 3 / 2
+                       && advancesAtBaseBpm > 0;
+    printf ("  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -448,7 +659,7 @@ int main (int argc, char* argv[])
         auto& apvts = processor.getAPVTS();
         // hostSync OFF -> internal free-running clock drives the sequencer.
         apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
-        processor.setInternalBpm (kBpm);
+        setInternalBpm (processor, kBpm);
 
         auto& seq = processor.getSequencer();
         seq.setEnabled (true);
@@ -529,7 +740,9 @@ int main (int argc, char* argv[])
     const bool testAPass = testFreshInstanceIsTransparent();
     const bool testBPass = testPresetTransitionResetsCurves();
     const bool testCPass = testMalformedCurveTreeFixtures();
-    if (! testAPass || ! testBPass || ! testCPass)
+    const bool testDPass = testSequencerOffBypassesStepsButCurvesStillWork();
+    const bool testEPass = testApvtsInternalBpmChangesFreeRunSpeed();
+    if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");
