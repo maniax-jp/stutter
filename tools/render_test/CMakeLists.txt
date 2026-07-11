@@ -6,6 +6,7 @@
 add_executable(render_test
     render_test.cpp
     ${CMAKE_SOURCE_DIR}/src/PluginProcessor.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/ParameterLayout.cpp
     ${CMAKE_SOURCE_DIR}/src/PluginEditor.cpp
     ${CMAKE_SOURCE_DIR}/src/PresetManager.cpp
     ${CMAKE_SOURCE_DIR}/src/FactoryPresets.cpp

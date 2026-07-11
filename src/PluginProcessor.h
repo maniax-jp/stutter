@@ -67,15 +67,14 @@ public:
 
     // Lane construction order matches SPEC's 8 lanes:
     // 0 Stutter, 1 TapeStop, 2 TapeStart, 3 Reverse, 4 Repitch, 5 Gate, 6 Filter, 7 Crush
-    static constexpr int laneStutter   = 0;
-    static constexpr int laneTapeStop  = 1;
-    static constexpr int laneTapeStart = 2;
-    static constexpr int laneReverse   = 3;
-    static constexpr int laneRepitch   = 4;
-    static constexpr int laneGate      = 5;
-    static constexpr int laneFilter    = 6;
-    static constexpr int laneCrush     = 7;
-
+    static constexpr int laneStutter   = stutter::lanes::stutterLane;
+    static constexpr int laneTapeStop  = stutter::lanes::tapeStop;
+    static constexpr int laneTapeStart = stutter::lanes::tapeStart;
+    static constexpr int laneReverse   = stutter::lanes::reverse;
+    static constexpr int laneRepitch   = stutter::lanes::repitch;
+    static constexpr int laneGate      = stutter::lanes::gate;
+    static constexpr int laneFilter    = stutter::lanes::filter;
+    static constexpr int laneCrush     = stutter::lanes::crush;
 private:
     void updateTransportAndSequence (juce::AudioBuffer<float>& buffer);
     void applyGlobalModulators (juce::AudioBuffer<float>& buffer);

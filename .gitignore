@@ -6,4 +6,5 @@
 build/
 *.vst3
 *.component
+/*.wav
 .DS_Store

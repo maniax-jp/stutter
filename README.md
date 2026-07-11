@@ -42,7 +42,7 @@ cmake --build build -j8
 
 ## ドキュメント
 
-仕様・State構造は [SPEC.md](SPEC.md) を参照。
+仕様・State構造は [SPEC.md](docs/SPEC.md) を参照。
 
 ## License
 

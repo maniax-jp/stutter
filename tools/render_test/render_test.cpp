@@ -616,9 +616,11 @@ int main (int argc, char* argv[])
 {
     juce::ScopedJuceInitialiser_GUI juceInit; // safe/no-op headless; ensures MessageManager exists for APVTS
 
-    const juce::String outDir = argc > 1 ? juce::String (argv[1]) : juce::String (".");
-    juce::File outputDirectory (outDir);
+    const juce::File outputDirectory = argc > 1
+        ? juce::File::getCurrentWorkingDirectory().getChildFile (argv[1])
+        : juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("stutter_render_test");
     outputDirectory.createDirectory();
+    printf ("output dir: %s\n", outputDirectory.getFullPathName().toRawUTF8());
 
     // Pre-roll: run the test signal through the capture buffer for ~1s with the sequencer
     // pattern still off before enabling all 16 steps, so buffer-category lanes (TapeStop/

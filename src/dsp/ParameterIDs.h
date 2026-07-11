@@ -91,3 +91,16 @@ inline float neutralValueForCurve (const juce::String& curveName) noexcept
 }
 
 } // namespace stutter::ID
+
+namespace stutter::lanes
+{
+constexpr int stutterLane = 0;
+constexpr int tapeStop    = 1;
+constexpr int tapeStart   = 2;
+constexpr int reverse     = 3;
+constexpr int repitch     = 4;
+constexpr int gate        = 5;
+constexpr int filter      = 6;
+constexpr int crush       = 7;
+constexpr int count       = 8;
+} // namespace stutter::lanes
