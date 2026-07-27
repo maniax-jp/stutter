@@ -132,6 +132,12 @@ public:
     /** Current division for the block grid's playhead, or -1 when idle. */
     int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
 
+    /** A v2 lane's effect, for the UI to read its parameter descriptors. */
+    stutter::LaneEffect* getBlockSequencerEffect (int lane) noexcept
+    {
+        return blockSequencer.getLaneEffect (lane);
+    }
+
 private:
     stutter::SceneStore sceneStore;
     stutter::LiveParamOverlay paramOverlay;

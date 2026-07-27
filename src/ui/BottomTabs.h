@@ -3,6 +3,7 @@
 #include "StutterLookAndFeel.h"
 #include "LaneParamPanel.h"
 #include "CurveEditor.h"
+#include "ModRoutePanel.h"
 
 class StutterAudioProcessor;
 
@@ -26,7 +27,7 @@ public:
     void resized() override;
 
 private:
-    enum class Tab { Lane, Volume, Filter, Pan };
+    enum class Tab { Lane, Volume, Filter, Pan, Mod };
 
     void selectTab (Tab t);
     void updateLaneTabLabel();
@@ -39,11 +40,13 @@ private:
     juce::TextButton volumeTabButton { "VOLUME" };
     juce::TextButton filterTabButton { "FILTER" };
     juce::TextButton panTabButton { "PAN" };
+    juce::TextButton modTabButton { "MOD" };
 
     LaneParamPanel laneParamPanel;
     CurveEditor volumeCurveEditor;
     CurveEditor filterCurveEditor;
     CurveEditor panCurveEditor;
+    ModRoutePanel modRoutePanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BottomTabs)
 };

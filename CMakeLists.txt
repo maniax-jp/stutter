@@ -50,6 +50,7 @@ target_sources(Stutter
         src/ui/StepGrid.cpp
     src/ui/BlockGrid.cpp
     src/ui/SceneBrowser.cpp
+    src/ui/ModRoutePanel.cpp
         src/ui/LaneParamPanel.cpp
         src/ui/CurveEditor.cpp
         src/ui/BottomTabs.cpp

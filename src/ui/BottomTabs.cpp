@@ -10,7 +10,8 @@ BottomTabs::BottomTabs (StutterAudioProcessor& processor)
       laneParamPanel (processor),
       volumeCurveEditor (processor, stutter::ModTarget::Volume, Palette::accent),
       filterCurveEditor (processor, stutter::ModTarget::Filter, Palette::laneColours[6]),
-      panCurveEditor (processor, stutter::ModTarget::Pan, Palette::laneColours[3])
+      panCurveEditor (processor, stutter::ModTarget::Pan, Palette::laneColours[3]),
+      modRoutePanel (processor, processor.getSceneDocument())
 {
     auto setupTab = [this] (juce::TextButton& b, Tab t)
     {
@@ -24,11 +25,13 @@ BottomTabs::BottomTabs (StutterAudioProcessor& processor)
     setupTab (volumeTabButton, Tab::Volume);
     setupTab (filterTabButton, Tab::Filter);
     setupTab (panTabButton, Tab::Pan);
+    setupTab (modTabButton, Tab::Mod);
 
     addChildComponent (laneParamPanel);
     addChildComponent (volumeCurveEditor);
     addChildComponent (filterCurveEditor);
     addChildComponent (panCurveEditor);
+    addChildComponent (modRoutePanel);
 
     selectTab (Tab::Lane);
 }
@@ -70,11 +73,13 @@ void BottomTabs::selectTab (Tab t)
     volumeTabButton.setToggleState (t == Tab::Volume, juce::dontSendNotification);
     filterTabButton.setToggleState (t == Tab::Filter, juce::dontSendNotification);
     panTabButton.setToggleState (t == Tab::Pan, juce::dontSendNotification);
+    modTabButton.setToggleState (t == Tab::Mod, juce::dontSendNotification);
 
     laneParamPanel.setVisible (t == Tab::Lane);
     volumeCurveEditor.setVisible (t == Tab::Volume);
     filterCurveEditor.setVisible (t == Tab::Filter);
     panCurveEditor.setVisible (t == Tab::Pan);
+    modRoutePanel.setVisible (t == Tab::Mod);
 
     repaint();
 }
@@ -101,11 +106,13 @@ void BottomTabs::resized()
     volumeTabButton.setBounds (tabStrip.removeFromLeft (90).reduced (2));
     filterTabButton.setBounds (tabStrip.removeFromLeft (90).reduced (2));
     panTabButton.setBounds (tabStrip.removeFromLeft (90).reduced (2));
+    modTabButton.setBounds (tabStrip.removeFromLeft (90).reduced (2));
 
     laneParamPanel.setBounds (r);
     volumeCurveEditor.setBounds (r);
     filterCurveEditor.setBounds (r);
     panCurveEditor.setBounds (r);
+    modRoutePanel.setBounds (r);
 }
 
 } // namespace stutter::ui
