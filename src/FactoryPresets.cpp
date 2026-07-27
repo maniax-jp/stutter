@@ -6,8 +6,12 @@
 //   0 Stutter (ST), 1 TapeStop (TS), 2 TapeStart (TT), 3 Reverse (RV),
 //   4 Repitch (RP), 5 Gate (GT), 6 Filter (FL), 7 Crush (CR)
 //
-// Rate/slice-length choice index legend (StutterEffect::rateToFraction / ReverseEffect,
-// shared table): 0=1/4 1=1/8 2=1/16 3=1/32 4=1/64 5=1/4T 6=1/8T 7=1/16T 8=1/4. 9=1/8. 10=1/16.
+// Rate/slice-length choice index legend (stutter::legacyRateIndexLabels(), shared by
+// Stutter and Reverse):
+//   0=1/16 1=1/32 2=1/64 3=1/128 4=1/256 5=1/16T 6=1/32T 7=1/64T 8=1/16. 9=1/32. 10=1/64.
+// NOTE: through v1.1.2 these were labelled 1/4..1/64, four times longer than what the DSP
+// actually produced. Only the labels changed -- the indices below are untouched, so every
+// preset sounds exactly as it was authored.
 //
 // Curve sync-division index legend (PluginProcessor.cpp barFractionTable):
 // 0=1/1 1=1/2 2=1/4 3=1/8 4=1/16

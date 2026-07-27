@@ -1,0 +1,40 @@
+# v1.1.2 per-lane discontinuity metrics — golden baseline
+#
+# Produced by tools/render_test at commit 58cf80b (tag-equivalent v1.1.2), macOS arm64,
+# Release build. These accompany v1-lane-renders.sha256: the checksums prove bit-identity,
+# these numbers say *how* a render differs when it no longer matches, which is what you
+# actually need while debugging a WP1/WP3 regression.
+#
+# Render conditions (all fixed, no RNG anywhere in the v1 signal path):
+#   48000 Hz / block 512 / 120 BPM / 4 bars / hostSync OFF (internal free-run clock)
+#   Test signal: 220 Hz sine, amplitude alternating 1.0 / 0.05 per quarter note
+#   1.0 s pre-roll with all steps OFF, then all 16 steps ON for the soloed lane
+#   Analysis window skips the pre-roll plus one further block (cold-start transient)
+#
+# Columns:
+#   maxDelta   max adjacent-sample delta over the analysis window
+#   >0.3       count of deltas above the severe-click bar (must stay 0)
+#   >discont   count above 2x the clean-220Hz-sine baseline of 0.028798 (must stay 0)
+#   RMS        RMS over the analysis window
+#   rangeViol  capture-buffer reads outside the declared slice window (must stay 0)
+#
+# BASELINE UPDATE 2026-07-27: the audio path switched from StepSequencer to
+# BlockSequencer. Seven of the eight lanes stayed bit-identical; only Filter's checksum
+# changed, and the metrics below are unchanged for every lane including Filter.
+#
+# The Filter difference was measured rather than assumed: 61124 of 769024 samples differ by
+# a maximum of 1 LSB in 24-bit (8388608 full scale), i.e. about -138 dBFS. That is
+# floating-point rounding, not a behavioural change -- BlockSequencer derives the division
+# length as a double where StepSequencer used an int, and Filter is the only lane whose LFO
+# phase accumulates across that value. Verified by rendering both paths and differencing
+# them sample by sample.
+#
+# Lane        maxDelta      >0.3   >discont         RMS   rangeViol
+Stutter       0.049230         0          0    0.506871           0
+TapeStop      0.001304         0          0    0.044121           0
+TapeStart     0.038302         0          0    0.500717           0
+Reverse       0.029698         0          0    0.504533           0
+Repitch       0.021425         0          0    0.504635           0
+Gate          0.031770         0          0    0.348693           0
+Filter        0.032502         0          0    0.516004           0
+Crush         0.028809         0          0    0.500625           0

@@ -21,10 +21,17 @@ struct Palette
     static const juce::Colour accent;
     static const juce::Colour accentDim;
 
-    // Lane accent colours (8), Buffer lanes (0-4) trend cyan/blue/violet family,
-    // Texture lanes (5-7) trend warm/saturated (orange/green/red) so the two
-    // categories read as visually distinct groups at a glance.
-    static const std::array<juce::Colour, 8> laneColours;
+    // Lane accent colours (12). Buffer lanes (0-4) trend cyan/blue/violet, Texture lanes
+    // (5-7, 11) trend warm/saturated, and the v2 additions (8-11) continue the same split so
+    // the two categories still read as distinct groups at a glance.
+    static const std::array<juce::Colour, 12> laneColours;
+
+    /** Lane accent, clamped. Prefer this over indexing laneColours directly so a lane index
+        from state cannot read past the end. */
+    static juce::Colour laneColour (int laneIndex) noexcept
+    {
+        return laneColours[(size_t) juce::jlimit (0, (int) laneColours.size() - 1, laneIndex)];
+    }
 };
 
 /** Custom JUCE LookAndFeel: dark theme, glow rotary knobs, custom toggle. */

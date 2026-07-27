@@ -92,6 +92,15 @@ inline float neutralValueForCurve (const juce::String& curveName) noexcept
 
 } // namespace stutter::ID
 
+namespace stutter
+{
+// v1 pattern geometry. StepSequencer is gone, but the v1 preset format (and the tests that
+// exercise curve reset through it) still describes an 8x16 grid, so the dimensions outlive
+// the class that used to own them.
+static constexpr int numLanes = 8;
+static constexpr int numSteps = 16;
+}
+
 namespace stutter::lanes
 {
 constexpr int stutterLane = 0;
@@ -102,5 +111,12 @@ constexpr int repitch     = 4;
 constexpr int gate        = 5;
 constexpr int filter      = 6;
 constexpr int crush       = 7;
-constexpr int count       = 8;
+// v2 lanes (WP10). Only the block sequencer knows about these; the v1 grid has no
+// representation for them.
+constexpr int stretcher   = 8;
+constexpr int shuffler    = 9;
+constexpr int delay       = 10;
+constexpr int distort     = 11;
+constexpr int count       = 8;   // lanes carried over from v1, still used by the v1 preset format
+constexpr int countV2     = 12;
 } // namespace stutter::lanes

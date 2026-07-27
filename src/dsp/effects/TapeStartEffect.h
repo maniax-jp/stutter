@@ -1,7 +1,5 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
 #include <cmath>
 
 namespace stutter
@@ -18,8 +16,18 @@ namespace stutter
 class TapeStartEffect : public LaneEffect
 {
 public:
-    TapeStartEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Buffer), apvts (state), laneIndex (laneIdx) {}
+    TapeStartEffect() : LaneEffect (LaneCategory::Buffer) {}
+
+    const char* getName() const noexcept override { return "Tape Start"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr ParamDescriptor descs[] = {
+            { "curve", "TapeStart Curve", 0.0f, 1.0f, 0.5f, 0.0f, 1.0f, "", nullptr, 0, true, true },
+            { "time",  "TapeStart Time",  0.0f, 1.0f, 0.5f, 0.0f, 1.0f, "", nullptr, 0, true, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -35,31 +43,30 @@ public:
         curveAmount = 0.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
-        juce::ignoreUnused (capture, nowAbs);
-        curveAmount = getParam (ID::tapeStartCurve, 0.5f);
-        const float timeParam = getParam (ID::tapeStartTime, 0.5f);
+        juce::ignoreUnused (capture);
+        curveAmount = params.get (0);
+        const float timeParam = params.get (1);
         const double scale = 0.25 + timeParam * 2.75;
-        durationSamples = juce::jmax (256.0, stepLengthSamples * scale);
+        durationSamples = juce::jmax (256.0, ctx.divisionLengthSamples * scale);
         elapsedSamples = 0.0;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (progress);
-
         const double t = juce::jlimit (0.0, 1.0, elapsedSamples / durationSamples);
 
-        // absPos is a position curve of t vs live nowAbs each sample (not a fixed onStepStart
+        // absPos is a position curve of t vs live nowAbs each sample (not a fixed onBlockStart
         // anchor). G(t) = I0(t) + B·(1-cos(πt))/π integrates the spin-up speed
         // s0(t)+B·sin(πt) with G(0)=0 and G(1)=1 identically, so gapT = D·(t-G(t)) is 0 at
         // both ends and absPos lands exactly on nowAbs at t=1; speed is then 1, so the handoff
         // to real-time is continuous. Live nowAbs also means a ContinueThroughRun lane held
         // past t=1 keeps gap=0 and tracks real-time within CaptureBuffer's history window.
         const double gapT = durationSamples * (t - positionFractionForT (t));
-        const double absPos = (double) nowAbs - gapT;
+        const double absPos = (double) ctx.nowAbs - gapT;
         for (int c = 0; c < numCh; ++c)
             channelSamples[c] = capture.readInterpolatedAbsolute (c, absPos);
 
@@ -90,15 +97,6 @@ private:
         return i0 + B * (1.0 - std::cos (pi * t)) / pi;
     }
 
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

@@ -9,8 +9,14 @@
 #include "dsp/effects/GateEffect.h"
 #include "dsp/effects/FilterEffect.h"
 #include "dsp/effects/CrushEffect.h"
+#include "dsp/effects/StretcherEffect.h"
+#include "dsp/effects/ShufflerEffect.h"
+#include "dsp/effects/DelayEffect.h"
+#include "dsp/effects/DistortionEffect.h"
 
 #include "dsp/ParameterLayout.h"
+#include "state/SceneSchema.h"
+#include <array>
 
 using namespace stutter;
 
@@ -22,19 +28,73 @@ StutterAudioProcessor::StutterAudioProcessor()
                            .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    sequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect> (apvts, laneStutter));
-    sequencer.setLaneEffect (laneTapeStop,  std::make_unique<TapeStopEffect> (apvts, laneTapeStop));
-    sequencer.setLaneEffect (laneTapeStart, std::make_unique<TapeStartEffect> (apvts, laneTapeStart));
-    sequencer.setLaneEffect (laneReverse,   std::make_unique<ReverseEffect> (apvts, laneReverse));
-    sequencer.setLaneEffect (laneRepitch,   std::make_unique<RepitchEffect> (apvts, laneRepitch));
-    sequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect> (apvts, laneGate));
-    sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect> (apvts, laneFilter));
-    sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect> (apvts, laneCrush));
+    // The block sequencer owns the audio path. It carries all twelve lanes; StepSequencer
+    // above is the v1 grid and has no representation for the four v2 additions.
+    blockSequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect>());
+    blockSequencer.setLaneEffect (laneTapeStop,  std::make_unique<TapeStopEffect>());
+    blockSequencer.setLaneEffect (laneTapeStart, std::make_unique<TapeStartEffect>());
+    blockSequencer.setLaneEffect (laneReverse,   std::make_unique<ReverseEffect>());
+    blockSequencer.setLaneEffect (laneRepitch,   std::make_unique<RepitchEffect>());
+    blockSequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect>());
+    blockSequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect>());
+    blockSequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
+    blockSequencer.setLaneEffect (laneStretcher, std::make_unique<StretcherEffect>());
+    blockSequencer.setLaneEffect (laneShuffler,  std::make_unique<ShufflerEffect>());
+    blockSequencer.setLaneEffect (laneDelay,     std::make_unique<DelayEffect>());
+    blockSequencer.setLaneEffect (laneDistort,   std::make_unique<DistortionEffect>());
 
+    // Register each lane's declared defaults with the schema BEFORE the document is built,
+    // so the first bake already has them. A scene that omits a lane would otherwise get
+    // all-zero parameters -- a Filter at cutoff 0 and a Gate at duty 0 are both silent, so
+    // an unconfigured lane would produce nothing rather than its neutral sound.
+    for (int lane = 0; lane < stutter::maxLanes; ++lane)
+    {
+        if (auto* effect = blockSequencer.getLaneEffect (lane))
+        {
+            const auto set = effect->getParamDescriptors();
+            std::array<float, stutter::maxParamsPerLane> defs {};
+            for (int i = 0; i < set.count && i < stutter::maxParamsPerLane; ++i)
+                defs[(size_t) i] = set[i].defaultValue;
+            stutter::SceneSchema::setLaneDefaults (lane, defs.data(),
+                                                  juce::jmin (set.count, stutter::maxParamsPerLane));
+        }
+    }
+
+    sceneDocument = std::make_unique<stutter::SceneDocument> (sceneStore, undoManager);
     presetManager = std::make_unique<stutter::PresetManager> (*this);
+
+    // Mirror write-back. APVTS holds a copy of the active scene's lane values, so an edit that
+    // stops there is discarded the next time a scene change refills the mirror -- which is
+    // what turning a knob and then playing another note used to do.
+    for (int lane = 0; lane < stutter::maxLanes; ++lane)
+    {
+        auto* effect = blockSequencer.getLaneEffect (lane);
+        if (effect == nullptr)
+            continue;
+
+        const auto set = effect->getParamDescriptors();
+        for (int p = 0; p < set.count && p < stutter::maxParamsPerLane; ++p)
+        {
+            const auto id = ID::lanePrefix (lane) + set[p].id;
+            if (apvts.getParameter (id) == nullptr)
+                continue;
+
+            auto listener = std::make_unique<LaneParamWriteback> (*this, lane, p, id);
+            apvts.addParameterListener (id, listener.get());
+            laneParamWritebacks.push_back (std::move (listener));
+        }
+    }
+
+    startTimerHz (2);
 }
 
-StutterAudioProcessor::~StutterAudioProcessor() = default;
+StutterAudioProcessor::~StutterAudioProcessor()
+{
+    // APVTS outlives the listeners it holds raw pointers to, so they have to be detached
+    // explicitly rather than left to member destruction order.
+    for (auto& w : laneParamWritebacks)
+        apvts.removeParameterListener (w->paramID, w.get());
+}
 
 //==============================================================================
 juce::AudioProcessorValueTreeState::ParameterLayout StutterAudioProcessor::createParameterLayout()
@@ -44,7 +104,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout StutterAudioProcessor::creat
 
 //==============================================================================
 const juce::String StutterAudioProcessor::getName() const { return JucePlugin_Name; }
-bool StutterAudioProcessor::acceptsMidi() const { return false; }
+bool StutterAudioProcessor::acceptsMidi() const { return true; }
 bool StutterAudioProcessor::producesMidi() const { return false; }
 bool StutterAudioProcessor::isMidiEffect() const { return false; }
 double StutterAudioProcessor::getTailLengthSeconds() const { return 0.0; }
@@ -57,7 +117,11 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     const int numCh = juce::jmax (getTotalNumInputChannels(), getTotalNumOutputChannels());
 
     captureBuffer.prepare (sampleRate, numCh, 2.5);
-    sequencer.prepare (sampleRate, numCh);
+    gestureEngine.prepare (sampleRate);
+    blockSequencer.prepare (sampleRate, numCh);
+    modulationEngine.prepare (sampleRate);
+    lastChainOrderScene = -1;
+    gestureEngine.setIdentityMapping();
 
     dryWetSmoothed.reset (sampleRate, 0.02);
     outputGainSmoothed.reset (sampleRate, 0.02);
@@ -113,7 +177,7 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 {
     const bool hostSyncEnabled = apvts.getRawParameterValue (ID::hostSync)->load() > 0.5f;
 
-    sequencer.setEnabled (apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f);
+    blockSequencer.setEnabled (apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f);
 
     double bpm = apvts.getRawParameterValue (ID::internalBpm)->load();
     double ppqAtBlockStart = internalClockPpq;
@@ -148,7 +212,40 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
     if (! usingHostSync)
         ppqAtBlockStart = internalClockPpq;
 
-    sequencer.processBlock (buffer, captureBuffer, ppqAtBlockStart, ppqPerSample);
+    // v2: the block sequencer drives the audio. It reads the scene the gesture layer has
+    // selected, so a MIDI note changes what is playing rather than merely what is displayed.
+    //
+    // A null scene (nothing published, or an index with no data) leaves the buffer untouched
+    // rather than silencing it -- an unmapped note should be inert, not a dropout.
+    if (const auto* scene = sceneStore.get (gestureEngine.getActiveScene()))
+    {
+        if (scene->populated)
+        {
+            // Chain order can change with the scene, and sorting per sample would be waste;
+            // doing it here costs one pass per block.
+            if (lastChainOrderScene != gestureEngine.getActiveScene())
+            {
+                blockSequencer.updateChainOrder (*scene);
+                lastChainOrderScene = gestureEngine.getActiveScene();
+            }
+
+            // Stick release: hold the pattern where it stopped instead of letting it run on.
+            // Freezing the PPQ handed to the sequencer is what "freeze" means here -- the
+            // block cursor, division phase and modulation all derive from it, so pinning it
+            // stops every one of them together. Advancing it by 0 also keeps the effects
+            // reading the same slice, which is the sound the mode promises.
+            const bool frozen = gestureEngine.isFrozen();
+            if (frozen && frozenPpq < 0.0)
+                frozenPpq = ppqAtBlockStart;
+            else if (! frozen)
+                frozenPpq = -1.0;
+
+            blockSequencer.processBlock (buffer, captureBuffer, *scene,
+                                         frozen ? frozenPpq : ppqAtBlockStart,
+                                         frozen ? 0.0 : ppqPerSample,
+                                         &modulationEngine);
+        }
+    }
 
     // Advance internal free-running clock for next block regardless (so it stays live when host stops)
     internalClockPpq = ppqAtBlockStart + ppqPerSample * (double) buffer.getNumSamples();
@@ -301,17 +398,26 @@ void StutterAudioProcessor::applyDryWetAndGain (const juce::AudioBuffer<float>& 
         const float mix = dryWetSmoothed.getNextValue();
         const float gain = outputGainSmoothed.getNextValue();
 
+        // The gesture gate collapses the WET signal toward dry rather than toward silence,
+        // and it is applied here rather than by muting the sequencer. Both choices matter:
+        // gating to dry means releasing a note leaves the source audible instead of dropping
+        // a hole in the track, and gating with a ramp on the mix means every transition is
+        // click-free by construction rather than by care. In Auto mode this sits at 1.0 and
+        // the expression below reduces to exactly what v1 computed.
+        const float gate = gestureEngine.nextGateGain();
+        const float effectiveMix = mix * gate;
+
         for (int c = 0; c < numCh; ++c)
         {
             const float dry = dryBuffer.getReadPointer (juce::jmin (c, dryBuffer.getNumChannels() - 1))[n];
             const float wet = wetBuffer.getReadPointer (c)[n];
-            const float mixed = dry + mix * (wet - dry);
+            const float mixed = dry + effectiveMix * (wet - dry);
             wetBuffer.getWritePointer (c)[n] = mixed * gain;
         }
     }
 }
 
-void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
+void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk, const juce::MidiBuffer& chunkMidi)
 {
     // Capture the (dry) input into the always-on ring buffer. This must happen per-chunk (not
     // once for the whole host block) because StepSequencer::processBlock() anchors its reads to
@@ -335,6 +441,15 @@ void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
 
     juce::AudioBuffer<float> dryView (dryScratchBuffer.getArrayOfWritePointers(), chunkChannels, chunkSamples);
 
+    // 0. Gesture layer. Runs BEFORE the sequencer so a note arriving in this chunk can change
+    //    the active scene before the chunk is rendered, rather than one chunk late.
+    {
+        const auto* scene = sceneStore.get (gestureEngine.getActiveScene());
+        gestureEngine.currentPatternBeats = scene != nullptr ? scene->beats : 4;
+        const auto releaseMode = scene != nullptr ? scene->releaseMode : stutter::ReleaseMode::OnGrid;
+        gestureEngine.processMidi (chunkMidi, chunkSamples, lastKnownPpq, lastPpqPerSample, releaseMode);
+    }
+
     // 1. Transport sync + step sequencer (lane effects read from captureBuffer, write into `chunk`)
     updateTransportAndSequence (chunk);
 
@@ -348,7 +463,6 @@ void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
 void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    midiMessages.clear();
 
     // dryScratchMaxSamples is only set (non-zero) by prepareToPlay(); dryScratchBuffer is sized
     // from it, and processChunk()/the chunking loop below both assume it's a valid, non-zero
@@ -384,10 +498,23 @@ void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const int n = juce::jmin (chunkCapacity, numSamples - offset);
 
         juce::AudioBuffer<float> chunk (buffer.getArrayOfWritePointers(), numChannels, offset, n);
-        processChunk (chunk);
+
+        // Slice this chunk's MIDI, rebasing event offsets to the chunk. Without the rebase a
+        // note landing late in a large host block would appear at the same offset in every
+        // chunk, so quantization would compute the wrong target position.
+        juce::MidiBuffer chunkMidi;
+        for (const auto meta : midiMessages)
+            if (meta.samplePosition >= offset && meta.samplePosition < offset + n)
+                chunkMidi.addEvent (meta.getMessage(), meta.samplePosition - offset);
+
+        processChunk (chunk, chunkMidi);
 
         offset += n;
     }
+
+    // Consume the MIDI rather than forwarding it: this is an audio effect, and a host that
+    // received these notes back would double-trigger anything chained after it.
+    midiMessages.clear();
 }
 
 //==============================================================================
@@ -401,11 +528,33 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
 
-    // Attach structural (non-parameter) data: step grid + curves
-    state.removeChild (state.getChildWithName (ID::sequencerNode), nullptr);
-    state.removeChild (state.getChildWithName (ID::curvesNode), nullptr);
+    // Write v2 schema version so setStateInformation can distinguish from v1 state.
+    state.setProperty (stutter::SceneIDs::version, stutter::stateSchemaVersion, nullptr);
 
-    state.appendChild (sequencer.toValueTree(), nullptr);
+    // Attach structural (non-parameter) data: scenes + curves.
+    state.removeChild (state.getChildWithName (ID::curvesNode), nullptr);
+    state.removeChild (state.getChildWithName (stutter::SceneIDs::scenesNode), nullptr);
+
+    // The scene document is the authority here, not the store: the store holds the last
+    // *published* bank, so saving from it would silently drop edits made since the last
+    // publish. setStateInformation feeds this same node straight back to the store.
+    if (sceneDocument != nullptr)
+        state.appendChild (sceneDocument->getState().createCopy(), nullptr);
+
+    // Which scene was live, so reopening a project returns to it rather than to whichever
+    // scene happens to come first in the bank.
+    state.setProperty (stutter::SceneIDs::activeScene, gestureEngine.getActiveScene(), nullptr);
+
+    // Performance settings. Not APVTS parameters: Play Mode and Scene Lock change what MIDI
+    // *means* rather than scaling a value, and a host automating them mid-phrase would make
+    // note handling unpredictable in a way no one would ask for.
+    state.setProperty (stutter::SceneIDs::playMode,
+                       (int) gestureEngine.getPlayMode(), nullptr);
+    state.setProperty (stutter::SceneIDs::sceneLock,
+                       gestureEngine.isSceneLocked(), nullptr);
+    state.setProperty (stutter::SceneIDs::triggerQuantize,
+                       gestureEngine.getTriggerQuantize(), nullptr);
+
 
     juce::ValueTree curvesTree (ID::curvesNode);
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
@@ -431,8 +580,70 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
     if (! newState.isValid())
         return;
 
+    // Version guard: v1 state has no version property, so getProperty yields 1.
+    // Reject older state rather than half-applying an incompatible tree.
+    const int version = (int) newState.getProperty (stutter::SceneIDs::version, 1);
+    if (version < stutter::stateSchemaVersion)
+    {
+        loadInitState();
+        return;
+    }
+
+    auto scenesNode = newState.getChildWithName (stutter::SceneIDs::scenesNode);
+
+    if (scenesNode.isValid())
+    {
+        // Restore through the document, which republishes to the store. Loading the store
+        // directly would leave the editor's tree empty, so the grid would show nothing while
+        // the audio path played the restored scenes, and the next UI edit would overwrite
+        // them from that empty tree.
+        if (sceneDocument != nullptr)
+            sceneDocument->replaceState (scenesNode);
+        else
+            sceneStore.rebuildFromTree (scenesNode);
+
+        // Land on a scene that actually exists. The factory banks map their scenes to MIDI
+        // notes from C4 up, so a freshly loaded bank would otherwise sit on empty scene 0 and
+        // make no sound at all until the user happened to play the right note -- the plugin
+        // looking broken on first contact. An explicitly saved activeScene wins, so reopening
+        // a project still returns to whatever the user was on.
+        const int savedActive = (int) newState.getProperty (stutter::SceneIDs::activeScene, -1);
+        int target = savedActive;
+
+        if (target < 0 || sceneStore.get (target) == nullptr || ! sceneStore.get (target)->populated)
+        {
+            target = -1;
+            for (int i = 0; i < stutter::maxScenes && target < 0; ++i)
+                if (const auto* s = sceneStore.get (i))
+                    if (s->populated && s->hasAnyBlocks())
+                        target = i;
+        }
+
+        if (target >= 0)
+            gestureEngine.setActiveScene (target);
+    }
+
+    // Performance settings. Read outside the scenes branch: a preset that carries no <Scenes>
+    // node still has to reset these, or a leftover MIDI mode from the previous patch would
+    // silence a freshly loaded one until the user found the control.
+    {
+        const int mode = (int) newState.getProperty (stutter::SceneIDs::playMode,
+                                                     (int) stutter::PlayMode::Auto);
+        gestureEngine.setPlayMode (mode == (int) stutter::PlayMode::Midi
+                                       ? stutter::PlayMode::Midi
+                                       : stutter::PlayMode::Auto);
+        gestureEngine.setSceneLock ((bool) newState.getProperty (stutter::SceneIDs::sceneLock, false));
+        gestureEngine.setTriggerQuantize ((double) newState.getProperty (stutter::SceneIDs::triggerQuantize, 0.0));
+    }
+
+    // The v1 Curves node is still read: the three global curve modulators
+    // (Volume/Filter/Pan) predate the routable matrix and remain the way those three
+    // targets are shaped, so presets carrying them must still load. The v1 Sequencer node
+    // is looked up only to be stripped below -- nothing consumes it since the block
+    // sequencer took over.
     auto sequencerTree = newState.getChildWithName (ID::sequencerNode);
     auto curvesTree = newState.getChildWithName (ID::curvesNode);
+    juce::ignoreUnused (sequencerTree);
 
     // Strip structural nodes before handing off to APVTS (it only expects parameter children)
     auto paramsOnlyState = newState.createCopy();
@@ -447,7 +658,6 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
     // preset that omits this structural data (old/hand-edited user presets, presets that don't
     // touch a given curve, etc.) always yields a full reset rather than leaving residue from
     // whatever was previously loaded.
-    sequencer.fromValueTree (sequencerTree);
 
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
     for (size_t i = 0; i < curves.size(); ++i)
@@ -468,6 +678,157 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
         }
         curves[i].fromValueTree (matchedCurve);
     }
+}
+
+void StutterAudioProcessor::timerCallback()
+{
+    sceneStore.collectGarbage();
+    mirrorActiveSceneToApvts();
+}
+
+void StutterAudioProcessor::mirrorActiveSceneToApvts()
+{
+    // The audio thread only ever flags which scene became active; it never touches APVTS.
+    // This runs on the message thread and does the actual parameter writes, which is what
+    // keeps a MIDI-triggered scene change off the audio thread's critical path.
+    const int scene = gestureEngine.consumePendingMirror();
+    if (scene < 0 || sceneDocument == nullptr)
+        return;
+
+    auto sceneTree = sceneDocument->ensureScene (scene);
+    if (! sceneTree.isValid())
+        return;
+
+    auto laneParams = sceneTree.getChildWithName (stutter::SceneIDs::laneParams);
+
+    // Suppress the write-back listener for the duration. Without this the parameter changes
+    // below would be read as user edits and written straight back into the scene we are
+    // mirroring FROM -- a feedback loop that would also mark every scene switch as a
+    // document edit.
+    const juce::ScopedValueSetter<bool> guard (suppressParamWriteback, true);
+
+    for (int lane = 0; lane < stutter::maxLanes; ++lane)
+    {
+        auto* effect = blockSequencer.getLaneEffect (lane);
+        if (effect == nullptr)
+            continue;
+
+        const auto set = effect->getParamDescriptors();
+
+        // Locate this lane's stored values, if the scene has any. A scene that omits the
+        // lane mirrors the descriptor defaults instead, matching what the audio thread is
+        // actually rendering (see SceneSchema::setLaneDefaults).
+        juce::ValueTree laneNode;
+        if (laneParams.isValid())
+            for (int i = 0; i < laneParams.getNumChildren(); ++i)
+                if ((int) laneParams.getChild (i).getProperty (stutter::SceneIDs::index, -1) == lane)
+                    laneNode = laneParams.getChild (i);
+
+        for (int p = 0; p < set.count && p < stutter::maxParamsPerLane; ++p)
+        {
+            float value = set[p].defaultValue;
+
+            if (laneNode.isValid())
+                for (int c = 0; c < laneNode.getNumChildren(); ++c)
+                {
+                    const auto pt = laneNode.getChild (c);
+                    if (pt.hasType (stutter::SceneIDs::param)
+                        && (int) pt.getProperty (stutter::SceneIDs::paramIndexProp, -1) == p)
+                        value = (float) pt.getProperty (stutter::SceneIDs::value, value);
+                }
+
+            if (auto* param = apvts.getParameter (ID::lanePrefix (lane) + set[p].id))
+            {
+                const auto& range = apvts.getParameterRange (ID::lanePrefix (lane) + set[p].id);
+                param->setValueNotifyingHost (range.convertTo0to1 (value));
+            }
+        }
+    }
+
+    mirroredScene = scene;
+}
+
+void StutterAudioProcessor::writeLaneParamToScene (int lane, int paramIndex, float value)
+{
+    if (sceneDocument == nullptr || suppressParamWriteback)
+        return;
+
+    // Write to the scene the mirror was last filled from, not to whatever is active now. A
+    // scene change flags the mirror and the timer refills it, so between those two moments
+    // the APVTS values still belong to the previous scene; taking the live scene here would
+    // copy the old scene's values over the new one.
+    const int target = mirroredScene >= 0 ? mirroredScene : gestureEngine.getActiveScene();
+
+    auto sceneTree = sceneDocument->ensureScene (target);
+    if (! sceneTree.isValid())
+        return;
+
+    auto laneParams = sceneTree.getOrCreateChildWithName (stutter::SceneIDs::laneParams, nullptr);
+
+    juce::ValueTree laneNode;
+    for (int i = 0; i < laneParams.getNumChildren(); ++i)
+        if ((int) laneParams.getChild (i).getProperty (stutter::SceneIDs::index, -1) == lane)
+            laneNode = laneParams.getChild (i);
+
+    if (! laneNode.isValid())
+    {
+        laneNode = juce::ValueTree (stutter::SceneIDs::lane);
+        laneNode.setProperty (stutter::SceneIDs::index, lane, nullptr);
+        laneParams.appendChild (laneNode, nullptr);
+    }
+
+    for (int i = 0; i < laneNode.getNumChildren(); ++i)
+    {
+        auto pt = laneNode.getChild (i);
+        if (pt.hasType (stutter::SceneIDs::param)
+            && (int) pt.getProperty (stutter::SceneIDs::paramIndexProp, -1) == paramIndex)
+        {
+            // No undo entry: knob drags emit a continuous stream of these, and one history
+            // step per pixel would make undo useless for everything else.
+            pt.setProperty (stutter::SceneIDs::value, value, nullptr);
+            sceneDocument->publish();
+            return;
+        }
+    }
+
+    juce::ValueTree pt (stutter::SceneIDs::param);
+    pt.setProperty (stutter::SceneIDs::paramIndexProp, paramIndex, nullptr);
+    pt.setProperty (stutter::SceneIDs::value, value, nullptr);
+    laneNode.appendChild (pt, nullptr);
+    sceneDocument->publish();
+}
+
+void StutterAudioProcessor::loadInitState()
+{
+    // Reset every parameter to the value declared in the layout, then clear the structural
+    // data. Copying the state and replacing it with itself would be a no-op -- the
+    // parameters have to be driven back to their defaults explicitly, or a rejected load
+    // would leave whatever the user last had dialled in.
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            ranged->setValueNotifyingHost (ranged->getDefaultValue());
+
+    // An invalid tree makes each curve fall back to its own neutral value (see
+    // ID::neutralValueForCurve) -- the same path Test C exercises for malformed state.
+    for (size_t i = 0; i < curves.size(); ++i)
+        curves[i].fromValueTree (juce::ValueTree {});
+
+    // Scenes are structural, so resetting parameters does not touch them. Without this an
+    // Init -- including the fallback taken when a state load is rejected -- would leave the
+    // previous session's blocks playing under a patch claiming to be empty.
+    if (sceneDocument != nullptr)
+    {
+        juce::ValueTree empty (stutter::SceneIDs::scenesNode);
+        sceneDocument->replaceState (empty);
+        sceneDocument->ensureScene (0);
+        sceneDocument->publish();
+    }
+
+    // Performance settings back to defaults too. Leaving MIDI mode on would make an Init
+    // patch silent until a note arrived, which reads as the plugin being broken.
+    gestureEngine.setPlayMode (stutter::PlayMode::Auto);
+    gestureEngine.setSceneLock (false);
+    gestureEngine.setTriggerQuantize (0.0);
 }
 
 //==============================================================================

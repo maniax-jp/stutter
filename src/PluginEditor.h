@@ -4,7 +4,9 @@
 #include "PluginProcessor.h"
 #include "ui/StutterLookAndFeel.h"
 #include "ui/HeaderBar.h"
-#include "ui/StepGrid.h"
+#include "ui/BlockGrid.h"
+#include "ui/SceneBrowser.h"
+#include "ui/PerformanceBar.h"
 #include "ui/BottomTabs.h"
 
 /**
@@ -12,7 +14,7 @@
 
     Layout:
       - HeaderBar   (logo, preset browser placeholder, dry/wet + output knobs, seq toggle, BPM)
-      - StepGrid    (8 lanes x 16 steps, live playhead, drag-paint, lane selection)
+      - BlockGrid   (12 lanes, variable-length blocks, live playhead, lane selection)
       - BottomTabs  (LANE params for the selected lane / VOLUME / FILTER / PAN curve editors)
 */
 class StutterAudioProcessorEditor : public juce::AudioProcessorEditor
@@ -30,7 +32,9 @@ private:
     stutter::ui::StutterLookAndFeel lookAndFeel;
 
     stutter::ui::HeaderBar headerBar;
-    stutter::ui::StepGrid stepGrid;
+    stutter::ui::SceneBrowser sceneBrowser;
+    stutter::ui::PerformanceBar performanceBar;
+    stutter::ui::BlockGrid blockGrid;
     stutter::ui::BottomTabs bottomTabs;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StutterAudioProcessorEditor)

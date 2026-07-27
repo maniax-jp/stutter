@@ -1,7 +1,5 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
 #include <array>
 #include <cmath>
 
@@ -15,8 +13,23 @@ namespace stutter
 class FilterEffect : public LaneEffect
 {
 public:
-    FilterEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Texture), apvts (state), laneIndex (laneIdx) {}
+    FilterEffect() : LaneEffect (LaneCategory::Texture) {}
+
+    const char* getName() const noexcept override { return "Filter"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr const char* typeChoices[] = { "Low Pass", "Band Pass", "High Pass" };
+        static constexpr const char* lfoRateChoices[] = { "1/4", "1/2", "1/1", "2/1", "4/1", "8/1" };
+        static constexpr ParamDescriptor descs[] = {
+            { "type",      "Filter Type",      0.0f,     2.0f,     0.0f,    0.0f, 1.0f, "",   typeChoices,    3, true,  true },
+            { "cutoff",    "Filter Cutoff",    20.0f, 20000.0f,  1000.0f,   1.0f, 0.3f, "Hz", nullptr,        0, false, true },
+            { "resonance", "Filter Resonance", 0.0f,     0.99f,    0.2f,    0.0f, 1.0f, "",   nullptr,        0, false, true },
+            { "lfoRate",   "Filter LFO Rate",  0.0f,     5.0f,     2.0f,    0.0f, 1.0f, "",   lfoRateChoices, 6, true,  true },
+            { "lfoDepth",  "Filter LFO Depth", 0.0f,     1.0f,     0.0f,    0.0f, 1.0f, "",   nullptr,        0, false, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -35,23 +48,24 @@ public:
         lfoPhase = 0.0;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
-        juce::ignoreUnused (capture, nowAbs);
-        filterType = (int) getParam (ID::filterType, 0.0f);
-        cutoffHz = getParam (ID::filterCutoff, 1000.0f);
-        resonance = juce::jlimit (0.0f, 0.99f, getParam (ID::filterResonance, 0.2f));
-        lfoRateParam = getParam (ID::filterLfoRate, 4.0f);
-        lfoDepth = juce::jlimit (0.0f, 1.0f, getParam (ID::filterLfoDepth, 0.0f));
-        stepLenSamplesD = juce::jmax (1.0, (double) stepLengthSamples);
-        lfoCyclesPerStep = rateToCycles ((int) lfoRateParam);
+        juce::ignoreUnused (capture);
+        filterType = params.getIndex (0);
+        cutoffHz = params.get (1);
+        resonance = juce::jlimit (0.0f, 0.99f, params.get (2));
+        lfoRateParam = params.get (3);
+        lfoDepth = juce::jlimit (0.0f, 1.0f, params.get (4));
+        stepLenSamplesD = juce::jmax (1.0, ctx.divisionLengthSamples);
+        lfoCyclesPerStep = rateToCycles (params.getIndex (3));
         lfoPhase = 0.0;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (capture, progress, nowAbs);
+        juce::ignoreUnused (capture, ctx);
 
         const float lfoValue = lfoDepth > 0.0f
             ? std::sin (juce::MathConstants<float>::twoPi * (float) std::fmod (lfoPhase * lfoCyclesPerStep, 1.0))
@@ -106,13 +120,6 @@ private:
         return table[index];
     }
 
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
     struct SvfState
     {
         float low = 0.0f;
@@ -121,8 +128,6 @@ private:
 
     static constexpr int maxChannels = 8;
 
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

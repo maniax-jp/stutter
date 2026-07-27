@@ -68,7 +68,14 @@ jobs:
       - name: Build
         run: cmake --build "${BUILD_DIR}" --config Release -j8
 
-      - name: Run render_test (offline DSP regression harness)
+      - name: Run the test suites (ctest)
+        run: |
+          set -euo pipefail
+          # The Catch2 suites are the gate. render_test below still runs, but its job is
+          # producing the WAVs the golden-baseline step compares.
+          ctest --test-dir "${BUILD_DIR}" --output-on-failure
+
+      - name: Run render_test (renders the lane WAVs the golden gate compares)
         run: |
           set -euo pipefail
           RENDER_TEST_BIN="${BUILD_DIR}/tools/render_test/render_test"
@@ -80,6 +87,18 @@ jobs:
           mkdir -p "$RENDER_TEST_OUT"
           if ! "$RENDER_TEST_BIN" "$RENDER_TEST_OUT"; then
             echo "::error::render_test reported failures (see log above)"
+            exit 1
+          fi
+
+      - name: Verify DSP output against the v1.1.2 golden baseline
+        run: |
+          set -euo pipefail
+          # The v2 rewrite's core claim is that replacing the parameter model, the sequencer
+          # and the state layer did not change a single sample. This is what enforces it --
+          # see tests/fixtures/golden/README.md for when updating the baseline is legitimate.
+          if ! tests/fixtures/golden/verify-against-v1.sh \
+               "${BUILD_DIR}/tools/render_test/render_test"; then
+            echo "::error::DSP output diverged from the v1.1.2 baseline"
             exit 1
           fi
 

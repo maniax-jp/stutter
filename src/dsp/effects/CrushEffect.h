@@ -1,7 +1,5 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
 #include <array>
 
 namespace stutter
@@ -12,8 +10,18 @@ namespace stutter
 class CrushEffect : public LaneEffect
 {
 public:
-    CrushEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Texture), apvts (state), laneIndex (laneIdx) {}
+    CrushEffect() : LaneEffect (LaneCategory::Texture) {}
+
+    const char* getName() const noexcept override { return "Crush"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr ParamDescriptor descs[] = {
+            { "bitDepth", "Crush Bit Depth", 1.0f, 16.0f, 16.0f, 1.0f, 1.0f, "bit", nullptr, 0, false, true },
+            { "rateDiv",  "Crush Rate Div",  0.0f,  1.0f,  0.0f, 0.0f, 1.0f, "",    nullptr, 0, false, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -29,20 +37,21 @@ public:
             v = 0.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
-        juce::ignoreUnused (capture, stepLengthSamples, nowAbs);
-        bitDepth = juce::jlimit (1.0f, 16.0f, getParam (ID::crushBitDepth, 16.0f));
-        const float rateDivParam = juce::jlimit (0.0f, 1.0f, getParam (ID::crushRateDiv, 0.0f));
+        juce::ignoreUnused (capture, ctx);
+        bitDepth = juce::jlimit (1.0f, 16.0f, params.get (0));
+        const float rateDivParam = juce::jlimit (0.0f, 1.0f, params.get (1));
         // rateDiv 0..1 maps to hold length 1..40 samples (downsample factor)
         holdLength = juce::jmax (1, (int) std::round (1.0f + rateDivParam * 39.0f));
         holdCounter = 0;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (capture, progress, nowAbs);
+        juce::ignoreUnused (capture, ctx);
 
         const bool sampleNow = (holdCounter % holdLength) == 0;
         const float levels = std::pow (2.0f, bitDepth) - 1.0f;
@@ -61,17 +70,8 @@ public:
     }
 
 private:
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
     static constexpr int maxChannels = 8;
 
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

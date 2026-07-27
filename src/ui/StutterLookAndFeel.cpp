@@ -14,7 +14,7 @@ const juce::Colour Palette::textLo = juce::Colour (0xff868c9c);
 const juce::Colour Palette::accent    = juce::Colour (0xff5ce1e6);
 const juce::Colour Palette::accentDim = juce::Colour (0xff2f6f73);
 
-const std::array<juce::Colour, 8> Palette::laneColours = { {
+const std::array<juce::Colour, 12> Palette::laneColours = { {
     juce::Colour (0xff37e2e8), // 0 Stutter    - cyan
     juce::Colour (0xff5b8cff), // 1 TapeStop   - blue
     juce::Colour (0xff8f6bff), // 2 TapeStart  - violet
@@ -23,6 +23,10 @@ const std::array<juce::Colour, 8> Palette::laneColours = { {
     juce::Colour (0xffffb648), // 5 Gate       - orange (texture group starts, warm tones)
     juce::Colour (0xffff7a5c), // 6 Filter     - coral/red
     juce::Colour (0xffd6e04a), // 7 Crush      - acid yellow-green
+    juce::Colour (0xff6ad0ff), // 8 Stretcher  - ice blue (buffer group, cool)
+    juce::Colour (0xffa88bff), // 9 Shuffler   - lavender (buffer group, cool)
+    juce::Colour (0xff5ad6b4), // 10 Delay     - aqua green (send)
+    juce::Colour (0xffff6f8f), // 11 Distort   - hot pink (texture group, warm)
 } };
 
 StutterLookAndFeel::StutterLookAndFeel()

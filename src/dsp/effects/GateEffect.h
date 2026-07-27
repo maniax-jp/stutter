@@ -1,7 +1,5 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
 
 namespace stutter
 {
@@ -11,8 +9,22 @@ namespace stutter
 class GateEffect : public LaneEffect
 {
 public:
-    GateEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Texture), apvts (state), laneIndex (laneIdx) {}
+    GateEffect() : LaneEffect (LaneCategory::Texture) {}
+
+    const char* getName() const noexcept override { return "Gate"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr const char* rateChoices[] = {
+            "1/1", "1/2", "1/3", "1/4", "1/6", "1/8", "1/12", "1/16"
+        };
+        static constexpr ParamDescriptor descs[] = {
+            { "rate",  "Gate Rate",  0.0f, 7.0f,  3.0f, 0.0f, 1.0f, "", rateChoices, 8, true,  true },
+            { "duty",  "Gate Duty",  0.01f, 0.99f, 0.5f, 0.0f, 1.0f, "", nullptr,     0, false, true },
+            { "shape", "Gate Shape", 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, "", nullptr,     0, false, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -29,14 +41,14 @@ public:
         maxStepPerSample = 1.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
-        juce::ignoreUnused (capture, nowAbs);
-        const float rateParam = getParam (ID::gateRate, 4.0f); // pulses-per-step index
-        duty = juce::jlimit (0.01f, 0.99f, getParam (ID::gateDuty, 0.5f));
-        shape = juce::jlimit (0.0f, 1.0f, getParam (ID::gateShape, 0.0f));
-        pulsesPerStep = rateToPulses ((int) rateParam);
-        stepLenSamplesD = juce::jmax (1.0, (double) stepLengthSamples);
+        juce::ignoreUnused (capture);
+        duty = juce::jlimit (0.01f, 0.99f, params.get (1));
+        shape = juce::jlimit (0.0f, 1.0f, params.get (2));
+        pulsesPerStep = rateToPulses (params.getIndex (0));
+        stepLenSamplesD = juce::jmax (1.0, ctx.divisionLengthSamples);
         phase = 0.0;
         // Minimum edge slew: even at shape=0 (hard square), the gate's gain can never move from
         // 0<->1 in fewer than ~1.5ms of samples. This is independent of the shape parameter's
@@ -48,10 +60,10 @@ public:
         maxStepPerSample = (float) (1.0 / edgeSamples);
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (capture, progress, nowAbs);
+        juce::ignoreUnused (capture, ctx);
 
         const double pulsePhase = std::fmod (phase * pulsesPerStep, 1.0);
 
@@ -100,15 +112,6 @@ private:
         return table[index];
     }
 
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

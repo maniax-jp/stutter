@@ -23,6 +23,27 @@
 #include "PresetManager.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/ParameterIDs.h"
+#include "dsp/TimingMode.h"
+#include "dsp/effects/StutterEffect.h"
+#include "dsp/effects/ReverseEffect.h"
+#include "dsp/effects/TapeStopEffect.h"
+#include "dsp/effects/TapeStartEffect.h"
+#include "dsp/effects/RepitchEffect.h"
+#include "dsp/effects/GateEffect.h"
+#include "dsp/effects/FilterEffect.h"
+#include "dsp/effects/CrushEffect.h"
+#include "dsp/effects/StretcherEffect.h"
+#include "dsp/effects/ShufflerEffect.h"
+#include "dsp/effects/DelayEffect.h"
+#include "dsp/effects/DistortionEffect.h"
+#include "dsp/BlockSequencer.h"
+#include "dsp/GestureEngine.h"
+#include "dsp/ModulationEngine.h"
+#include "state/SceneSchema.h"
+#include "state/SceneSnapshot.h"
+#include "state/SceneStore.h"
+#include "state/SceneDocument.h"
+#include "FactoryScenes.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -39,7 +60,7 @@ constexpr double kSampleRate = 48000.0;
 constexpr int kBlockSize = 512;
 constexpr double kBpm = 120.0;
 constexpr int kNumBars = 4;
-constexpr double kClickThreshold = 0.3; // NOISE_FIX.md pass/fail bar: severe-click adjacent-sample delta
+constexpr double kClickThreshold = 0.3; // severe-click bar: adjacent-sample delta
 
 // A single continuous 220Hz sine at full amplitude has a maximum possible sample-to-sample
 // delta of ~0.0288 (2*pi*f/sr). Any splice/discontinuity artifact shows up as a delta well
@@ -71,7 +92,7 @@ static const LaneSpec kLanes[] = {
 struct Metrics
 {
     float maxAdjacentDelta = 0.0f;
-    int severeClickCount = 0;      // deltas > kClickThreshold (0.3, NOISE_FIX.md's literal bar)
+    int severeClickCount = 0;      // deltas > kClickThreshold (0.3)
     int discontinuityCount = 0;    // deltas > kDiscontinuityThreshold (tighter, discriminates splice noise)
     double rms = 0.0;
     int numSamples = 0;
@@ -131,13 +152,7 @@ void fillTestSignal (juce::AudioBuffer<float>& buf, double sampleRate, double bp
     }
 }
 
-void setAllStepsOn (stutter::StepSequencer& seq, int lane)
-{
-    for (int s = 0; s < stutter::numSteps; ++s)
-        seq.setStep (lane, s, true);
-}
-
-// internalBpm is APVTS-owned (see docs/ISSUES.md 2.2); processBlock reads it via
+// internalBpm is APVTS-owned; processBlock reads it via
 // getRawParameterValue(), so tests must set it the same way a host/preset would.
 void setInternalBpm (StutterAudioProcessor& processor, double bpm)
 {
@@ -148,468 +163,10 @@ void setInternalBpm (StutterAudioProcessor& processor, double bpm)
     }
 }
 
-double rmsOf (const juce::AudioBuffer<float>& buf)
-{
-    double sumSq = 0.0;
-    const int n = buf.getNumSamples();
-    const int ch = buf.getNumChannels();
-    for (int c = 0; c < ch; ++c)
-    {
-        const float* d = buf.getReadPointer (c);
-        for (int i = 0; i < n; ++i)
-            sumSq += (double) d[i] * (double) d[i];
-    }
-    return std::sqrt (sumSq / (double) juce::jmax (1, n * ch));
-}
-
-// Checks that a curve is "neutral": enabled state as expected, flat value == expectedValue
-// across the whole table (sampled), i.e. contributes no audible modulation.
-bool isCurveNeutral (const stutter::CurveModulator& c, float expectedValue, const char* label)
-{
-    bool ok = true;
-    for (int i = 0; i <= 16; ++i)
-    {
-        const float phase = (float) i / 16.0f;
-        const float v = c.getValueAtPhase (phase);
-        if (std::abs (v - expectedValue) > 1.0e-4f)
-        {
-            printf ("  FAIL: %s curve not flat at phase %.3f -> %.6f (expected %.6f)\n",
-                    label, phase, v, expectedValue);
-            ok = false;
-        }
-    }
-    return ok;
-}
-
-// (a) Fresh-instance default output must match dry signal (RMS diff < 0.1dB-equivalent).
-bool testFreshInstanceIsTransparent()
-{
-    printf ("\n[Test A] Fresh instance default output vs dry signal\n");
-
-    StutterAudioProcessor processor;
-    processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
-    processor.prepareToPlay (kSampleRate, kBlockSize);
-
-    auto& apvts = processor.getAPVTS();
-    apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
-    setInternalBpm (processor, kBpm);
-    // Sequencer stays fully OFF (freshly constructed) -- we're isolating the global
-    // Volume/Filter/Pan curve modulators, which run regardless of the step sequencer.
-
-    const int totalSamples = (int) std::round (2.0 * kSampleRate); // 2 seconds is plenty
-    juce::AudioBuffer<float> source (2, totalSamples);
-    fillTestSignal (source, kSampleRate, kBpm);
-
-    juce::AudioBuffer<float> rendered (2, totalSamples);
-    rendered.clear();
-
-    int pos = 0;
-    juce::MidiBuffer midi;
-    while (pos < totalSamples)
-    {
-        const int n = juce::jmin (kBlockSize, totalSamples - pos);
-        juce::AudioBuffer<float> block (2, kBlockSize);
-        block.clear();
-        for (int c = 0; c < 2; ++c)
-            block.copyFrom (c, 0, source, c, pos, n);
-
-        midi.clear();
-        processor.processBlock (block, midi);
-
-        for (int c = 0; c < 2; ++c)
-            rendered.copyFrom (c, pos, block, c, 0, n);
-        pos += n;
-    }
-
-    // Skip the first block (filter/smoothing settling from cold state).
-    const int analysisStart = juce::jmin (kBlockSize, totalSamples);
-    juce::AudioBuffer<float> dryView (source.getArrayOfWritePointers(), 2, analysisStart, totalSamples - analysisStart);
-    juce::AudioBuffer<float> wetView (rendered.getArrayOfWritePointers(), 2, analysisStart, totalSamples - analysisStart);
-
-    const double dryRms = rmsOf (dryView);
-    const double wetRms = rmsOf (wetView);
-    const double dbDiff = 20.0 * std::log10 (juce::jmax (1.0e-12, wetRms) / juce::jmax (1.0e-12, dryRms));
-
-    // Also check per-sample max abs diff, since RMS could mask e.g. a filter that changes
-    // spectral content but not overall level.
-    double maxAbsDiff = 0.0;
-    for (int c = 0; c < 2; ++c)
-    {
-        const float* d = dryView.getReadPointer (c);
-        const float* w = wetView.getReadPointer (c);
-        for (int i = 0; i < dryView.getNumSamples(); ++i)
-            maxAbsDiff = juce::jmax (maxAbsDiff, (double) std::abs (d[i] - w[i]));
-    }
-
-    printf ("  dry RMS=%.6f  wet RMS=%.6f  dB diff=%.4f dB  maxAbsSampleDiff=%.6f\n",
-            dryRms, wetRms, dbDiff, maxAbsDiff);
-
-    const bool pass = std::abs (dbDiff) < 0.1 && maxAbsDiff < 0.01;
-    printf ("  %s\n", pass ? "PASS" : "FAIL");
-    return pass;
-}
-
-// (b) "Trance Gate 16th" -> "Init" preset transition must reset all 3 curves to neutral.
-bool testPresetTransitionResetsCurves()
-{
-    printf ("\n[Test B] Trance Gate 16th -> Init resets all curves to neutral\n");
-
-    StutterAudioProcessor processor;
-    processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
-    processor.prepareToPlay (kSampleRate, kBlockSize);
-
-    auto& pm = processor.getPresetManager();
-    const auto& presets = pm.getPresets();
-
-    int tranceIdx = -1, initIdx = -1;
-    for (int i = 0; i < (int) presets.size(); ++i)
-    {
-        if (presets[(size_t) i].name == "Trance Gate 16th") tranceIdx = i;
-        if (presets[(size_t) i].name == "Init") initIdx = i;
-    }
-
-    if (tranceIdx < 0 || initIdx < 0)
-    {
-        printf ("  FAIL: could not find required presets (Trance=%d, Init=%d)\n", tranceIdx, initIdx);
-        return false;
-    }
-
-    pm.loadPreset (tranceIdx);
-    pm.loadPreset (initIdx);
-
-    bool pass = true;
-
-    auto& volumeCurve = processor.getCurve (stutter::ModTarget::Volume);
-    auto& filterCurve = processor.getCurve (stutter::ModTarget::Filter);
-    auto& panCurve    = processor.getCurve (stutter::ModTarget::Pan);
-
-    printf ("  Volume: enabled=%d points=%zu\n", volumeCurve.isEnabled(), volumeCurve.getPoints().size());
-    printf ("  Filter: enabled=%d points=%zu\n", filterCurve.isEnabled(), filterCurve.getPoints().size());
-    printf ("  Pan:    enabled=%d points=%zu\n", panCurve.isEnabled(), panCurve.getPoints().size());
-
-    if (! isCurveNeutral (volumeCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNameVolume), "Volume")) pass = false;
-    if (! isCurveNeutral (filterCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter), "Filter")) pass = false; // neutral = fully open (20kHz), not 0.5
-    if (! isCurveNeutral (panCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNamePan), "Pan")) pass = false;
-
-    // Filter must not be silently left "on" at a non-neutral value that audibly colors the
-    // signal; since neutral flat value (1.0 = cutoff wide open) makes enabled state irrelevant
-    // to the *sound*, we don't hard-require disabled here -- only that IF enabled, it's flat 1.0.
-    if (filterCurve.isEnabled() && ! isCurveNeutral (filterCurve, stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter), "Filter(enabled-check)"))
-        pass = false;
-
-    printf ("  %s\n", pass ? "PASS" : "FAIL");
-    return pass;
-}
-
-// (c) Malformed-state regression fixtures: CurveModulator::fromValueTree() must fall back to
-// neutral (rather than leaving stale/garbage state) whenever the incoming tree is structurally
-// incomplete. Covers three distinct shapes of "missing data" a hand-edited or older-version
-// preset XML could plausibly contain:
-//   1. Curves node present, but this particular curve's Curve node is entirely absent (invalid
-//      tree passed straight through, same path as "Curves node missing altogether").
-//   2. Curve node present but with only a single Point child (or none) -- not enough points to
-//      define a curve.
-//   3. Curve node with >=2 Point children, but a Point is missing its "value" property.
-bool testMalformedCurveTreeFixtures()
-{
-    printf ("\n[Test C] Malformed curve-tree fixtures fall back to neutral\n");
-    bool pass = true;
-
-    const float volumeNeutral = stutter::ID::neutralValueForCurve (stutter::ID::curveNameVolume);
-    const float filterNeutral = stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter);
-
-    // Fixture 1: curveNode entirely missing for this curve (an invalid/default-constructed tree,
-    // exactly what PluginProcessor::setStateInformation() passes when it can't find a matching
-    // <Curve name="..."> child under <Curves>).
-    {
-        stutter::CurveModulator curve (filterNeutral);
-        curve.setPoints ({ { 0.0f, 0.1f, 0.0f }, { 1.0f, 0.9f, 0.5f } }); // give it non-neutral state first
-        juce::ValueTree missing; // default-constructed == invalid
-        curve.fromValueTree (missing);
-        if (! isCurveNeutral (curve, filterNeutral, "Fixture1-Filter(missing curveNode)"))
-            pass = false;
-        if (curve.getPoints().size() < 2)
-        {
-            printf ("  FAIL: Fixture1 left curve with <2 points\n");
-            pass = false;
-        }
-    }
-
-    // Fixture 2: Curve node exists but has only one Point child (not enough to define a curve).
-    {
-        stutter::CurveModulator curve (volumeNeutral);
-        curve.setPoints ({ { 0.0f, 0.1f, 0.0f }, { 1.0f, 0.9f, 0.5f } });
-
-        juce::ValueTree curveTree (stutter::ID::curveNode);
-        curveTree.setProperty (stutter::ID::propEnabled, true, nullptr);
-        curveTree.setProperty (stutter::ID::propSyncDiv, 4, nullptr);
-        juce::ValueTree onlyPoint (stutter::ID::pointNode);
-        onlyPoint.setProperty (stutter::ID::propPosition, 0.5f, nullptr);
-        onlyPoint.setProperty (stutter::ID::propValue, 0.9f, nullptr);
-        curveTree.appendChild (onlyPoint, nullptr);
-
-        curve.fromValueTree (curveTree);
-        if (! isCurveNeutral (curve, volumeNeutral, "Fixture2-Volume(1 point)"))
-            pass = false;
-        if (curve.getPoints().size() < 2)
-        {
-            printf ("  FAIL: Fixture2 left curve with <2 points\n");
-            pass = false;
-        }
-    }
-
-    // Fixture 2b: Curve node exists with zero Point children.
-    {
-        stutter::CurveModulator curve (volumeNeutral);
-        curve.setPoints ({ { 0.0f, 0.1f, 0.0f }, { 1.0f, 0.9f, 0.5f } });
-
-        juce::ValueTree curveTree (stutter::ID::curveNode);
-        curveTree.setProperty (stutter::ID::propEnabled, true, nullptr);
-        curveTree.setProperty (stutter::ID::propSyncDiv, 4, nullptr);
-
-        curve.fromValueTree (curveTree);
-        if (! isCurveNeutral (curve, volumeNeutral, "Fixture2b-Volume(0 points)"))
-            pass = false;
-    }
-
-    // Fixture 3: Curve node with >=2 points, but one Point is missing its "value" property --
-    // must fall back to this curve's neutral value for that point, not JUCE's ValueTree default
-    // (0.0), which previously would have been a hardcoded 0.5f fallback baked into
-    // CurveModulator::fromValueTree() regardless of which curve it was.
-    {
-        stutter::CurveModulator curve (filterNeutral);
-
-        juce::ValueTree curveTree (stutter::ID::curveNode);
-        curveTree.setProperty (stutter::ID::propEnabled, true, nullptr);
-        curveTree.setProperty (stutter::ID::propSyncDiv, 4, nullptr);
-
-        juce::ValueTree pt0 (stutter::ID::pointNode);
-        pt0.setProperty (stutter::ID::propPosition, 0.0f, nullptr);
-        // propValue deliberately omitted -- should fall back to filterNeutral (1.0), not 0.5.
-        pt0.setProperty (stutter::ID::propCurvature, 0.0f, nullptr);
-        curveTree.appendChild (pt0, nullptr);
-
-        juce::ValueTree pt1 (stutter::ID::pointNode);
-        pt1.setProperty (stutter::ID::propPosition, 1.0f, nullptr);
-        pt1.setProperty (stutter::ID::propValue, 0.3f, nullptr);
-        pt1.setProperty (stutter::ID::propCurvature, 0.0f, nullptr);
-        curveTree.appendChild (pt1, nullptr);
-
-        curve.fromValueTree (curveTree);
-        const float v0 = curve.getValueAtPhase (0.0f);
-        printf ("  Fixture3: point0 (missing propValue) resolved to %.6f (expected neutral %.6f)\n",
-                v0, filterNeutral);
-        if (std::abs (v0 - filterNeutral) > 1.0e-4f)
-        {
-            printf ("  FAIL: Fixture3 missing-propValue point did not fall back to curve's neutral value\n");
-            pass = false;
-        }
-    }
-
-    printf ("  %s\n", pass ? "PASS" : "FAIL");
-    return pass;
-}
-
-// (d) sequencerOn == false must silence step effects entirely (output matches dry passthrough)
-// while the global Volume/Filter/Pan curve modulators keep running -- this is the "bypass ==
-// curve-only" contract from SPEC (docs/ISSUES.md 2.1). Drives a lane with all 16 steps ON (which
-// would otherwise audibly alter the signal) plus a non-neutral, enabled Volume curve, with
-// sequencerOn set to false via the APVTS parameter (the only supported way to reach the DSP, per
-// 2.1/2.2's "APVTS is the single source of truth" fix).
-bool testSequencerOffBypassesStepsButCurvesStillWork()
-{
-    printf ("\n[Test D] sequencerOn=false silences step lanes (dry match) while curves still modulate\n");
-    bool pass = true;
-
-    // --- D1: sequencerOn=false -> output must equal dry passthrough, even with a lane fully ON ---
-    {
-        StutterAudioProcessor processor;
-        processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
-        processor.prepareToPlay (kSampleRate, kBlockSize);
-
-        auto& apvts = processor.getAPVTS();
-        apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
-        setInternalBpm (processor, kBpm);
-        apvts.getParameter (stutter::ID::sequencerOn)->setValueNotifyingHost (0.0f); // OFF
-
-        // Make sure the Volume curve is neutral for this sub-test, isolating the step-lane bypass.
-        processor.getCurve (stutter::ModTarget::Volume).resetToDefault();
-        processor.getCurve (stutter::ModTarget::Filter).resetToDefault();
-        processor.getCurve (stutter::ModTarget::Pan).resetToDefault();
-
-        auto& seq = processor.getSequencer();
-        setAllStepsOn (seq, StutterAudioProcessor::laneStutter); // would be very audible if not bypassed
-
-        const int totalSamples = (int) std::round (1.5 * kSampleRate);
-        juce::AudioBuffer<float> source (2, totalSamples);
-        fillTestSignal (source, kSampleRate, kBpm);
-
-        juce::AudioBuffer<float> rendered (2, totalSamples);
-        rendered.clear();
-
-        int pos = 0;
-        juce::MidiBuffer midi;
-        while (pos < totalSamples)
-        {
-            const int n = juce::jmin (kBlockSize, totalSamples - pos);
-            juce::AudioBuffer<float> block (2, kBlockSize);
-            block.clear();
-            for (int c = 0; c < 2; ++c)
-                block.copyFrom (c, 0, source, c, pos, n);
-
-            midi.clear();
-            processor.processBlock (block, midi);
-
-            for (int c = 0; c < 2; ++c)
-                rendered.copyFrom (c, pos, block, c, 0, n);
-            pos += n;
-        }
-
-        double maxAbsDiff = 0.0;
-        for (int c = 0; c < 2; ++c)
-        {
-            const float* d = source.getReadPointer (c);
-            const float* w = rendered.getReadPointer (c);
-            for (int i = 0; i < totalSamples; ++i)
-                maxAbsDiff = juce::jmax (maxAbsDiff, (double) std::abs (d[i] - w[i]));
-        }
-
-        printf ("  D1: sequencerOn=false, lane fully ON -> maxAbsDiff vs dry = %.6f\n", maxAbsDiff);
-        if (maxAbsDiff > 1.0e-6)
-        {
-            printf ("  FAIL: expected exact dry passthrough (step lanes fully bypassed) when sequencerOn=false\n");
-            pass = false;
-        }
-    }
-
-    // --- D2: with sequencerOn=false, the Volume curve modulator must still audibly modulate ---
-    {
-        StutterAudioProcessor processor;
-        processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
-        processor.prepareToPlay (kSampleRate, kBlockSize);
-
-        auto& apvts = processor.getAPVTS();
-        apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
-        setInternalBpm (processor, kBpm);
-        apvts.getParameter (stutter::ID::sequencerOn)->setValueNotifyingHost (0.0f); // OFF
-
-        // Non-neutral, enabled Volume curve: SidechainDuck dips well below unity gain.
-        auto& volumeCurve = processor.getCurve (stutter::ModTarget::Volume);
-        volumeCurve.setEnabled (true);
-        volumeCurve.applyPreset ("SidechainDuck");
-        volumeCurve.setSyncDivision (2); // 1/4 bar per cycle, several cycles within the render
-
-        auto& seq = processor.getSequencer();
-        // Sequencer left fully OFF pattern-wise too (irrelevant since sequencerOn gates it anyway).
-        juce::ignoreUnused (seq);
-
-        const int totalSamples = (int) std::round (2.0 * kSampleRate);
-        juce::AudioBuffer<float> source (2, totalSamples);
-        fillTestSignal (source, kSampleRate, kBpm);
-
-        juce::AudioBuffer<float> rendered (2, totalSamples);
-        rendered.clear();
-
-        int pos = 0;
-        juce::MidiBuffer midi;
-        while (pos < totalSamples)
-        {
-            const int n = juce::jmin (kBlockSize, totalSamples - pos);
-            juce::AudioBuffer<float> block (2, kBlockSize);
-            block.clear();
-            for (int c = 0; c < 2; ++c)
-                block.copyFrom (c, 0, source, c, pos, n);
-
-            midi.clear();
-            processor.processBlock (block, midi);
-
-            for (int c = 0; c < 2; ++c)
-                rendered.copyFrom (c, pos, block, c, 0, n);
-            pos += n;
-        }
-
-        double maxAbsDiff = 0.0;
-        for (int c = 0; c < 2; ++c)
-        {
-            const float* d = source.getReadPointer (c);
-            const float* w = rendered.getReadPointer (c);
-            for (int i = 0; i < totalSamples; ++i)
-                maxAbsDiff = juce::jmax (maxAbsDiff, (double) std::abs (d[i] - w[i]));
-        }
-
-        printf ("  D2: sequencerOn=false, SidechainDuck Volume curve -> maxAbsDiff vs dry = %.6f\n", maxAbsDiff);
-        if (maxAbsDiff < 0.05)
-        {
-            printf ("  FAIL: expected the Volume curve modulator to audibly duck the signal even with sequencerOn=false\n");
-            pass = false;
-        }
-    }
-
-    printf ("  %s\n", pass ? "PASS" : "FAIL");
-    return pass;
-}
-
-// (e) internalBpm is APVTS-owned (2.2): changing it via the APVTS parameter must change the
-// free-running playhead's advance speed. Renders a fixed number of samples at two different
-// internalBpm values (hostSync off, transport free-running) and checks the sequencer's
-// playhead-step count advances proportionally faster at the higher BPM.
-bool testApvtsInternalBpmChangesFreeRunSpeed()
-{
-    printf ("\n[Test E] APVTS internalBpm change alters free-running playhead speed\n");
-
-    auto renderAndCountStepAdvances = [] (double bpm) -> int
-    {
-        StutterAudioProcessor processor;
-        processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
-        processor.prepareToPlay (kSampleRate, kBlockSize);
-
-        auto& apvts = processor.getAPVTS();
-        apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f); // force free-run
-        setInternalBpm (processor, bpm);
-
-        auto& seq = processor.getSequencer();
-        setAllStepsOn (seq, StutterAudioProcessor::laneGate); // any lane; only playhead advance matters
-
-        const int totalSamples = (int) std::round (2.0 * kSampleRate);
-        juce::AudioBuffer<float> block (2, kBlockSize);
-        juce::MidiBuffer midi;
-
-        int lastStep = -1;
-        int advances = 0;
-        int pos = 0;
-        while (pos < totalSamples)
-        {
-            const int n = juce::jmin (kBlockSize, totalSamples - pos);
-            block.setSize (2, n, false, false, true);
-            block.clear();
-
-            midi.clear();
-            processor.processBlock (block, midi);
-
-            const int step = seq.getCurrentPlayheadStep();
-            if (lastStep >= 0 && step != lastStep)
-                ++advances;
-            lastStep = step;
-
-            pos += n;
-        }
-        return advances;
-    };
-
-    const int advancesAtBaseBpm = renderAndCountStepAdvances (kBpm);
-    const int advancesAtDoubleBpm = renderAndCountStepAdvances (kBpm * 2.0);
-
-    printf ("  step advances @ %.0f BPM = %d, @ %.0f BPM = %d\n",
-            kBpm, advancesAtBaseBpm, kBpm * 2.0, advancesAtDoubleBpm);
-
-    // At double the BPM the playhead should cross roughly twice as many step boundaries in the
-    // same wall-clock render (allow generous tolerance for edge effects at start/end of render).
-    const bool pass = advancesAtDoubleBpm > advancesAtBaseBpm * 3 / 2
-                       && advancesAtBaseBpm > 0;
-    printf ("  %s\n", pass ? "PASS" : "FAIL");
-    return pass;
-}
-
+// The Catch2 suites in tests/ hold everything that asserts. What stays here is the lane
+// sweep: it renders each lane in isolation to a WAV so the result can be auditioned, and
+// reports discontinuity metrics so the golden-baseline gate has something to compare.
+// Producing audio a human listens to is not a job for a test framework.
 } // namespace
 
 int main (int argc, char* argv[])
@@ -663,10 +220,15 @@ int main (int argc, char* argv[])
         apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
         setInternalBpm (processor, kBpm);
 
-        auto& seq = processor.getSequencer();
-        seq.setEnabled (true);
-        // Pattern starts with all steps off during the pre-roll (see preRollSamples above) so
-        // the capture buffer fills with real history before the lane is ever triggered.
+        // The audio path is the block sequencer now, so the lane is driven by writing blocks
+        // into the scene document rather than by setting v1 steps. Sixteen 1-division blocks
+        // describe the same pattern the old "all 16 steps on" did.
+        //
+        // Blocks are added AFTER the pre-roll (see the loop below) so the capture buffer
+        // fills with real history before the lane is ever triggered -- buffer-category lanes
+        // would otherwise anchor into the silence that precedes sample 0.
+        auto& doc = processor.getSceneDocument();
+        const int renderScene = processor.getGestureEngine().getActiveScene();
 
         juce::AudioBuffer<float> renderedOutput (2, totalSamples);
         renderedOutput.clear();
@@ -678,7 +240,9 @@ int main (int argc, char* argv[])
         {
             if (! stepsEnabled && pos >= preRollSamples)
             {
-                setAllStepsOn (seq, laneSpec.laneIndex);
+                for (int d = 0; d < stutter::numSteps; ++d)
+                    doc.addBlock (renderScene, laneSpec.laneIndex, d, 1);
+                doc.publish();
                 stepsEnabled = true;
             }
 
@@ -739,13 +303,6 @@ int main (int argc, char* argv[])
     printf ("pass = (>%.2f count == 0) AND (rangeViol == 0); %s\n", kClickThreshold,
             anyFailures ? "SOME LANES FAILED" : "ALL LANES PASS");
 
-    const bool testAPass = testFreshInstanceIsTransparent();
-    const bool testBPass = testPresetTransitionResetsCurves();
-    const bool testCPass = testMalformedCurveTreeFixtures();
-    const bool testDPass = testSequencerOffBypassesStepsButCurvesStillWork();
-    const bool testEPass = testApvtsInternalBpmChangesFreeRunSpeed();
-    if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass)
-        anyFailures = true;
 
     printf ("\n========================================================================================\n");
     printf ("OVERALL: %s\n", anyFailures ? "FAIL" : "PASS");

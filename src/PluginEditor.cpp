@@ -2,25 +2,45 @@
 
 namespace
 {
-constexpr int defaultWidth = 900;
-constexpr int defaultHeight = 620;
+constexpr int defaultWidth = 1200;
+constexpr int defaultHeight = 800;
 }
 
 StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor& p)
     : AudioProcessorEditor (&p),
       processorRef (p),
       headerBar (p),
-      stepGrid (p),
+      sceneBrowser (p, p.getSceneDocument()),
+      performanceBar (p, p.getSceneDocument()),
+      blockGrid (p, p.getSceneDocument()),
       bottomTabs (p)
 {
     setLookAndFeel (&lookAndFeel);
 
     addAndMakeVisible (headerBar);
-    addAndMakeVisible (stepGrid);
+    addAndMakeVisible (sceneBrowser);
+    addAndMakeVisible (performanceBar);
+    addAndMakeVisible (blockGrid);
     addAndMakeVisible (bottomTabs);
 
-    stepGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
-    bottomTabs.setSelectedLane (stepGrid.getSelectedLane());
+    blockGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
+
+    // Beats/divisions/swing change the grid's shape, so it has to redraw against the new
+    // geometry rather than keep painting the old division count.
+    performanceBar.onGridGeometryChanged = [this] { blockGrid.repaint(); };
+
+    // Picking a scene in the browser points the grid at it, so the two panes always show the
+    // same scene rather than drifting apart.
+    sceneBrowser.onSceneSelected = [this] (int sceneIndex)
+    {
+        blockGrid.setSceneIndex (sceneIndex);
+        bottomTabs.setSceneIndex (sceneIndex);
+        performanceBar.setSceneIndex (sceneIndex);
+    };
+    blockGrid.setSceneIndex (sceneBrowser.getSelectedScene());
+    bottomTabs.setSceneIndex (sceneBrowser.getSelectedScene());
+    performanceBar.setSceneIndex (sceneBrowser.getSelectedScene());
+    bottomTabs.setSelectedLane (blockGrid.getSelectedLane());
 
     // Structural preset data (step grid + curve breakpoints) isn't APVTS-parameter-bound, so it
     // doesn't auto-refresh via attachment listeners the way sliders/combo boxes do -- force a
@@ -28,8 +48,15 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     processorRef.getPresetManager().onPresetLoaded = [this]
     {
         headerBar.refreshPresetLabel();
-        stepGrid.repaint();
+        blockGrid.repaint();
+        sceneBrowser.repaint();
         bottomTabs.refreshAfterPresetLoad();
+
+        // A preset carries Play Mode / Scene Lock / quantize and each scene's Release mode, so
+        // these have to be re-read rather than repainted -- combo boxes show their own state,
+        // not the model's.
+        performanceBar.setSceneIndex (sceneBrowser.getSelectedScene());
+        performanceBar.refresh();
     };
 
     setResizable (true, true);
@@ -44,7 +71,7 @@ StutterAudioProcessorEditor::~StutterAudioProcessorEditor()
     // The processor (and its PresetManager) can outlive this editor -- the host is free to
     // destroy/recreate the editor at any time while the processor stays alive. Clear the
     // callback so a preset load that happens after this editor is gone never invokes a
-    // dangling `this` (see docs/ISSUES.md 3.3).
+    // dangling `this`.
     processorRef.getPresetManager().onPresetLoaded = nullptr;
 
     setLookAndFeel (nullptr);
@@ -62,9 +89,11 @@ void StutterAudioProcessorEditor::resized()
     const float scale = (float) getWidth() / (float) defaultWidth;
 
     headerBar.setBounds (r.removeFromTop ((int) (72.0f * scale)));
+    sceneBrowser.setBounds (r.removeFromTop ((int) (56.0f * scale)));
+    performanceBar.setBounds (r.removeFromTop ((int) (30.0f * scale)));
 
-    auto bottomHeight = (int) (200.0f * scale);
+    auto bottomHeight = (int) (220.0f * scale);
     bottomTabs.setBounds (r.removeFromBottom (bottomHeight));
 
-    stepGrid.setBounds (r);
+    blockGrid.setBounds (r);
 }

@@ -4,17 +4,23 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "dsp/CaptureBuffer.h"
-#include "dsp/StepSequencer.h"
 #include "dsp/CurveModulator.h"
+#include "dsp/GestureEngine.h"
 #include "dsp/ParameterIDs.h"
 #include "PresetManager.h"
+#include "state/SceneStore.h"
+#include "state/LiveParamOverlay.h"
+#include "state/SceneDocument.h"
+#include "dsp/BlockSequencer.h"
+#include "dsp/ModulationEngine.h"
+#include "state/SceneSchema.h"
 
 namespace stutter
 {
 enum class ModTarget { Volume, Filter, Pan, Count };
 }
 
-class StutterAudioProcessor : public juce::AudioProcessor
+class StutterAudioProcessor : public juce::AudioProcessor, public juce::Timer
 {
 public:
     StutterAudioProcessor();
@@ -51,7 +57,6 @@ public:
 
     // ---- Public access for the (phase-2) editor ----
     juce::AudioProcessorValueTreeState& getAPVTS() noexcept { return apvts; }
-    stutter::StepSequencer& getSequencer() noexcept { return sequencer; }
     stutter::CurveModulator& getCurve (stutter::ModTarget target) noexcept
     {
         return curves[(size_t) target];
@@ -75,20 +80,36 @@ public:
     static constexpr int laneGate      = stutter::lanes::gate;
     static constexpr int laneFilter    = stutter::lanes::filter;
     static constexpr int laneCrush     = stutter::lanes::crush;
+    static constexpr int laneStretcher = stutter::lanes::stretcher;
+    static constexpr int laneShuffler  = stutter::lanes::shuffler;
+    static constexpr int laneDelay     = stutter::lanes::delay;
+    static constexpr int laneDistort   = stutter::lanes::distort;
 private:
     void updateTransportAndSequence (juce::AudioBuffer<float>& buffer);
     void applyGlobalModulators (juce::AudioBuffer<float>& buffer);
     void applyDryWetAndGain (const juce::AudioBuffer<float>& dryBuffer, juce::AudioBuffer<float>& wetBuffer);
 
+    void timerCallback() override;
+    void loadInitState();
+
+    /** Push the active scene's parameter values into APVTS so the UI and the host see what
+        is actually playing. Message thread only; see the implementation for why the
+        write-back listener must be suppressed while it runs. */
+    void mirrorActiveSceneToApvts();
+
+    /** Write one lane parameter back into the scene it belongs to.
+        APVTS is only a mirror: without this a knob edit lives in the mirror alone and is
+        overwritten the next time a scene change refills it, so the edit disappears. */
+    void writeLaneParamToScene (int lane, int paramIndex, float value);
+
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
         split into successive calls to this. */
-    void processChunk (juce::AudioBuffer<float>& chunk);
+    void processChunk (juce::AudioBuffer<float>& chunk, const juce::MidiBuffer& chunkMidi);
 
     juce::AudioProcessorValueTreeState apvts;
 
     stutter::CaptureBuffer captureBuffer;
-    stutter::StepSequencer sequencer;
 
     // Order matches ModTarget: Volume, Filter, Pan. Each starts enabled + flat at its own
     // neutral value (see stutter::ID::neutralValueForCurve, the single source of truth: 0.5 =
@@ -104,6 +125,83 @@ private:
     // Constructed last (after apvts/sequencer/curves exist) since it reads them when building
     // factory preset states; declared last so member destruction order doesn't matter either way.
     std::unique_ptr<stutter::PresetManager> presetManager;
+
+    // v2 scene store and scalar param overlay
+public:
+    /** The MIDI gesture layer. Exposed so the editor can drive Play Mode / Scene Lock and so
+        the offline harness can verify note handling end to end. */
+    stutter::GestureEngine& getGestureEngine() noexcept { return gestureEngine; }
+
+    /** The editable scene tree the UI mutates. Baked into SceneStore on publish(). */
+    stutter::SceneDocument& getSceneDocument() noexcept { return *sceneDocument; }
+
+    /** The baked bank the audio thread reads. Exposed read-only so tests can assert on what
+        actually reached the audio path, rather than on the document that was supposed to
+        produce it -- the two disagreeing is precisely the failure worth catching. */
+    const stutter::SceneStore& getSceneStore() const noexcept { return sceneStore; }
+
+    juce::UndoManager& getUndoManager() noexcept { return undoManager; }
+
+    /** Run one mirror pass immediately. The shipping path is the processor's timer; this is
+        exposed so the offline harness can drive it deterministically rather than depending
+        on message-loop scheduling. */
+    void pumpSceneMirror() { mirrorActiveSceneToApvts(); }
+
+    /** Current division for the block grid's playhead, or -1 when idle. */
+    int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
+
+    /** A v2 lane's effect, for the UI to read its parameter descriptors. */
+    stutter::LaneEffect* getBlockSequencerEffect (int lane) noexcept
+    {
+        return blockSequencer.getLaneEffect (lane);
+    }
+
+private:
+    stutter::SceneStore sceneStore;
+    stutter::LiveParamOverlay paramOverlay;
+
+    // Consumes MIDI and produces the wet-path gate. Sits ahead of the sequencer in
+    // processChunk so a note can change the active scene before that chunk is rendered.
+    stutter::GestureEngine gestureEngine;
+
+    // The sequencer. Drives the audio path and owns the playhead the block grid renders.
+    stutter::BlockSequencer blockSequencer;
+    stutter::ModulationEngine modulationEngine;
+
+    /** Which scene the chain order was last sorted for; -1 forces a re-sort. */
+    int lastChainOrderScene = -1;
+
+    /** Set while mirrorActiveSceneToApvts is writing, so the parameter listener can tell a
+        mirror write from a genuine user edit. Message thread only. */
+    bool suppressParamWriteback = false;
+
+    /** Which scene APVTS currently reflects; -1 before the first mirror. */
+    int mirroredScene = -1;
+
+    /** PPQ the pattern was pinned at by a Stick release; -1 when not frozen. Audio thread. */
+    double frozenPpq = -1.0;
+
+    /** One per lane parameter, so the callback already knows which lane and slot it is for
+        rather than parsing "lane3_decay" back apart on every knob move. */
+    struct LaneParamWriteback : juce::AudioProcessorValueTreeState::Listener
+    {
+        LaneParamWriteback (StutterAudioProcessor& p, int l, int idx, juce::String id)
+            : owner (p), lane (l), paramIndex (idx), paramID (std::move (id)) {}
+
+        void parameterChanged (const juce::String&, float newValue) override
+        {
+            owner.writeLaneParamToScene (lane, paramIndex, newValue);
+        }
+
+        StutterAudioProcessor& owner;
+        int lane, paramIndex;
+        juce::String paramID;   // kept so detaching does not have to re-derive it
+    };
+
+    std::vector<std::unique_ptr<LaneParamWriteback>> laneParamWritebacks;
+
+    juce::UndoManager undoManager;
+    std::unique_ptr<stutter::SceneDocument> sceneDocument;
 
     // Smoothed globals (audio-rate, click-free)
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> dryWetSmoothed;

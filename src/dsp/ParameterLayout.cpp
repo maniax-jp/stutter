@@ -1,5 +1,6 @@
 #include "ParameterLayout.h"
 #include "ParameterIDs.h"
+#include "TimingMode.h"
 
 namespace
 {
@@ -7,7 +8,13 @@ juce::String laneParamId (int lane, const juce::String& name) { return stutter::
 
 juce::StringArray rateChoices()
 {
-    return { "1/4", "1/8", "1/16", "1/32", "1/64", "1/4T", "1/8T", "1/16T", "1/4.", "1/8.", "1/16." };
+    // Pulled from TimingMode.h rather than spelled out here: these labels must name the
+    // durations legacyRateIndexToFraction() actually produces, and keeping a second copy
+    // in this file is precisely how v1 ended up displaying every rate 4x too long.
+    juce::StringArray choices;
+    for (int i = 0; i < stutter::numLegacyRateIndices; ++i)
+        choices.add (stutter::legacyRateIndexLabels()[i]);
+    return choices;
 }
 } // namespace
 
