@@ -29,48 +29,45 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
 > Init にフォールバックします(バージョンガードによる意図的な判断)。v1 のファクトリー
 > プリセット28個は v2 のブロックへ変換して同梱しています。
 
-## 使いかた
+## インストール
 
-エンドユーザー向けの操作説明は **[MANUAL.md](docs/MANUAL.md)** を参照。
+[リリースページ](https://github.com/maniax-jp/stutter/releases/latest)から
+`Stutter-<version>-macOS.zip` をダウンロードし、展開して配置します。
 
-## ビルド
+| 形式 | 配置先 |
+|---|---|
+| VST3 | `~/Library/Audio/Plug-Ins/VST3/` |
+| Audio Unit | `~/Library/Audio/Plug-Ins/Components/` |
+| Standalone | 任意の場所(`/Applications` など) |
+
+DAW を起動し直すとプラグインリストに現れます。Logic は初回のみ検証が走ります。
+
+### ⚠️ 配布ビルドは署名・公証されていません
+
+署名証明書が未設定のため ad-hoc 署名のみのビルドです。macOS が
+「開発元を確認できないため開けません」と表示してブロックします。
+
+**プラグイン(VST3 / AU)** — DAW のスキャンで弾かれるので、隔離属性を外します:
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j8
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Stutter.vst3
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Stutter.component
 ```
 
-JUCE 8.0.8 は CMake FetchContent で自動取得。ビルド後、VST3/AU は `~/Library/Audio/Plug-Ins/` に自動コピーされる。
+**Standalone アプリ** — Finder で右クリック →「開く」、または
+システム設定 → プライバシーとセキュリティ →「このまま開く」。
 
-### ユニバーサルビルド(arm64 + x86_64)
-
-デフォルトのローカルビルドはホストアーキテクチャ(Apple Silicon Mac では arm64 のみ)になる。
-Intel Mac でも動くユニバーサルバイナリを作る場合は `CMAKE_OSX_ARCHITECTURES` を指定する(CI もこの設定でビルドしている):
-
-```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-cmake --build build -j8
-```
-
-## 検証
-
-CI(macos-14)が以下を順に実行し、どれか一つでも落ちればリリースは publish されない:
-
-- `ctest` — Catch2 スイート(54ケース / 2186アサーション)
-- `render_test` + **ゴールデンベースライン照合** — 8レーンのレンダリング結果を v1.1.2 と
-  SHA-256 で比較。DSP の意図しない変化を検出する
-- ユニバーサルバイナリ検証(`lipo`)
-- `pluginval --strictness-level 8`(VST3)
-- `auval -v aufx Stt1 Manx`(AU)
+自分でビルドした場合はこの操作は不要です(ビルド方法は
+[SPEC.md](docs/SPEC.md#ビルド)を参照)。
 
 ## ドキュメント
 
 | 文書 | 対象 |
 |---|---|
 | [MANUAL.md](docs/MANUAL.md) | 使いかた(音楽制作者向け) |
-| [SPEC.md](docs/SPEC.md) | 設計の意図・State スキーマ・既知の制約 |
+| [SPEC.md](docs/SPEC.md) | 設計の意図・State スキーマ・ビルド・検証・既知の制約 |
 
-個々のクラスの詳細は各ヘッダの doc comment が一次情報。
+個々のクラスの詳細は各ヘッダの doc comment が一次情報です。
 
 ## License
 

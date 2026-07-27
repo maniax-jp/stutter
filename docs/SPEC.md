@@ -366,8 +366,8 @@ beats=4 × divisions=4 と厳密に一致するため、`buildScenesTreeFromStep
 
 ### 2つのターゲット
 
-- **`stutter_tests`**(Catch2、35ケース / 1310アサーション、`ctest` で0.27秒) — これがゲート。
-  24タグで絞り込める(`[modulation]` だけなら0.038秒)
+- **`stutter_tests`**(Catch2、55ケース / 2333アサーション、`ctest` で約1秒) — これがゲート。
+  27タグで絞り込める(`[modulation]` だけなら0.04秒)
 - **`render_test`**(311行) — 各レーンを WAV に書き出して人間が聴けるようにする。
   不連続性メトリクスも出力し、ゴールデンゲートがそれを比較する
 
@@ -387,8 +387,40 @@ beats=4 × divisions=4 と厳密に一致するため、`buildScenesTreeFromStep
 
 ### CI
 
-`ctest` → `render_test` → ゴールデン比較 → universal build 検証(lipo)→
-`pluginval --strictness-level 8` → `auval`。
+`ctest` → `render_test` → ゴールデン比較 → ユニバーサルビルド検証(lipo)→
+`pluginval --strictness-level 8`(VST3)→ `auval -v aufx Stt1 Manx`(AU)。
+
+**どれか一つでも落ちればリリースは publish されない。** v2.0.0 の初回ビルドは
+pluginval の Parameter thread safety で止まっており、このゲートは実際に機能している。
+
+署名・公証(`MACOS_CERT_P12` / `MACOS_CERT_PASSWORD`)は secret が設定されていれば
+実行され、無ければスキップされる。未設定のまま出荷したビルドは ad-hoc 署名になり、
+Gatekeeper に拒否される。
+
+---
+
+## ビルド
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
+```
+
+JUCE 8.0.8 は CMake FetchContent で自動取得される。ビルド後、VST3 / AU は
+`~/Library/Audio/Plug-Ins/` へ自動コピーされる。
+
+### ユニバーサルビルド(arm64 + x86_64)
+
+ローカルビルドの既定はホストアーキテクチャのみ(Apple Silicon なら arm64)。
+CI が出荷するのはユニバーサルバイナリなので、その構成を再現するには明示する:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake --build build -j8
+```
+
+**通常のローカルビルドではこの構成が検証されない。** リリース前には一度これで
+ビルドし、`lipo -archs` が両アーキテクチャを報告することを確認すること。
 
 ---
 
