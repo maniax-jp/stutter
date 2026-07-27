@@ -772,3 +772,95 @@ TEST_CASE ("A converted preset keeps its parameter values after mirroring", "[pr
     CHECK_THAT (proc.getAPVTS().getRawParameterValue (decayId)->load(),
                 WithinAbs (decayAfterLoad, 1.0e-4f));
 }
+
+TEST_CASE ("A MIDI note selects the scene mapped to it", "[presets][midi]")
+{
+    // The headline promise of the manual: load a bank, play a note, hear that scene. This is
+    // the default Auto mode -- the only mode a user can currently reach, since Play Mode and
+    // Scene Lock have no UI control.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int idx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].name == "Playable Set")
+            idx = i;
+    REQUIRE (idx >= 0);
+    pm.loadPreset (idx);
+
+    // Find a populated scene that is not the one we start on.
+    const int start = proc.getGestureEngine().getActiveScene();
+    int target = -1;
+    for (int i = 0; i < stutter::maxScenes && target < 0; ++i)
+        if (i != start)
+            if (const auto* s = proc.getSceneStore().get (i))
+                if (s->populated && s->hasAnyBlocks())
+                    target = i;
+    REQUIRE (target >= 0);
+
+    juce::AudioBuffer<float> buf (2, stutter::test::blockSize);
+    stutter::test::fillTestSignal (buf);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, target, 1.0f), 0);
+    proc.processBlock (buf, midi);
+
+    INFO ("note " << target << " should have selected scene " << target);
+    CHECK (proc.getGestureEngine().getActiveScene() == target);
+}
+
+TEST_CASE ("Switching scenes mid-playback does not click", "[presets][click]")
+{
+    // The manual tells users they can play scene changes live, so this has to hold with real
+    // factory content rather than only for the gate ramp in isolation.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int idx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].name == "Playable Set")
+            idx = i;
+    REQUIRE (idx >= 0);
+    pm.loadPreset (idx);
+
+    std::vector<int> populated;
+    for (int i = 0; i < stutter::maxScenes; ++i)
+        if (const auto* s = proc.getSceneStore().get (i))
+            if (s->populated && s->hasAnyBlocks())
+                populated.push_back (i);
+    REQUIRE (populated.size() >= 2);
+
+    const int total = (int) (stutter::test::sampleRate * 4.0);
+    juce::AudioBuffer<float> source (2, total);
+    stutter::test::fillTestSignal (source);
+
+    juce::AudioBuffer<float> out (2, total);
+    out.clear();
+
+    // Switch scene every half second, straight through the material.
+    const int switchEvery = (int) (stutter::test::sampleRate * 0.5);
+    size_t next = 0;
+
+    for (int pos = 0; pos < total; pos += stutter::test::blockSize)
+    {
+        const int n = juce::jmin (stutter::test::blockSize, total - pos);
+        juce::AudioBuffer<float> blk (2, n);
+        for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
+
+        juce::MidiBuffer midi;
+        if (pos / switchEvery != (pos - stutter::test::blockSize) / switchEvery)
+        {
+            midi.addEvent (juce::MidiMessage::noteOn (1, populated[next % populated.size()], 1.0f), 0);
+            ++next;
+        }
+
+        proc.processBlock (blk, midi);
+        for (int c = 0; c < 2; ++c) out.copyFrom (c, pos, blk, c, 0, n);
+    }
+
+    const auto m = stutter::test::analyze (out);
+    INFO ("max adjacent delta " << m.maxAdjacentDelta
+          << ", severe clicks " << m.severeClickCount);
+    CHECK (m.severeClickCount == 0);
+}
