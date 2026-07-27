@@ -13,6 +13,7 @@ add_executable(render_test
     ${CMAKE_SOURCE_DIR}/src/ui/StutterLookAndFeel.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/HeaderBar.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/StepGrid.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/BlockGrid.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/LaneParamPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/CurveEditor.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/BottomTabs.cpp

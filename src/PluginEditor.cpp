@@ -10,17 +10,17 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     : AudioProcessorEditor (&p),
       processorRef (p),
       headerBar (p),
-      stepGrid (p),
+      blockGrid (p, p.getSceneDocument()),
       bottomTabs (p)
 {
     setLookAndFeel (&lookAndFeel);
 
     addAndMakeVisible (headerBar);
-    addAndMakeVisible (stepGrid);
+    addAndMakeVisible (blockGrid);
     addAndMakeVisible (bottomTabs);
 
-    stepGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
-    bottomTabs.setSelectedLane (stepGrid.getSelectedLane());
+    blockGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
+    bottomTabs.setSelectedLane (blockGrid.getSelectedLane());
 
     // Structural preset data (step grid + curve breakpoints) isn't APVTS-parameter-bound, so it
     // doesn't auto-refresh via attachment listeners the way sliders/combo boxes do -- force a
@@ -28,7 +28,7 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     processorRef.getPresetManager().onPresetLoaded = [this]
     {
         headerBar.refreshPresetLabel();
-        stepGrid.repaint();
+        blockGrid.repaint();
         bottomTabs.refreshAfterPresetLoad();
     };
 
@@ -66,5 +66,5 @@ void StutterAudioProcessorEditor::resized()
     auto bottomHeight = (int) (200.0f * scale);
     bottomTabs.setBounds (r.removeFromBottom (bottomHeight));
 
-    stepGrid.setBounds (r);
+    blockGrid.setBounds (r);
 }

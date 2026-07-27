@@ -32,6 +32,7 @@ StutterAudioProcessor::StutterAudioProcessor()
     sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect>());
     sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
 
+    sceneDocument = std::make_unique<stutter::SceneDocument> (sceneStore, undoManager);
     presetManager = std::make_unique<stutter::PresetManager> (*this);
     startTimerHz (2);
 }
@@ -61,6 +62,7 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     captureBuffer.prepare (sampleRate, numCh, 2.5);
     sequencer.prepare (sampleRate, numCh);
     gestureEngine.prepare (sampleRate);
+    blockSequencer.prepare (sampleRate, numCh);
     gestureEngine.setIdentityMapping();
 
     dryWetSmoothed.reset (sampleRate, 0.02);

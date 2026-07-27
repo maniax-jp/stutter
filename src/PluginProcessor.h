@@ -11,6 +11,8 @@
 #include "PresetManager.h"
 #include "state/SceneStore.h"
 #include "state/LiveParamOverlay.h"
+#include "state/SceneDocument.h"
+#include "dsp/BlockSequencer.h"
 #include "state/SceneSchema.h"
 
 namespace stutter
@@ -118,6 +120,14 @@ public:
         the offline harness can verify note handling end to end. */
     stutter::GestureEngine& getGestureEngine() noexcept { return gestureEngine; }
 
+    /** The editable scene tree the UI mutates. Baked into SceneStore on publish(). */
+    stutter::SceneDocument& getSceneDocument() noexcept { return *sceneDocument; }
+
+    juce::UndoManager& getUndoManager() noexcept { return undoManager; }
+
+    /** Current division for the block grid's playhead, or -1 when idle. */
+    int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
+
 private:
     stutter::SceneStore sceneStore;
     stutter::LiveParamOverlay paramOverlay;
@@ -125,6 +135,14 @@ private:
     // Consumes MIDI and produces the wet-path gate. Sits ahead of the sequencer in
     // processChunk so a note can change the active scene before that chunk is rendered.
     stutter::GestureEngine gestureEngine;
+
+    // The v2 sequencer. Not yet driving the audio path -- StepSequencer still does that --
+    // but it owns the playhead the block grid renders, so the UI can be built and verified
+    // against real transport before the switchover.
+    stutter::BlockSequencer blockSequencer;
+
+    juce::UndoManager undoManager;
+    std::unique_ptr<stutter::SceneDocument> sceneDocument;
 
     // Smoothed globals (audio-rate, click-free)
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> dryWetSmoothed;

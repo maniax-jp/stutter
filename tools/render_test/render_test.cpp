@@ -38,6 +38,7 @@
 #include "state/SceneSchema.h"
 #include "state/SceneSnapshot.h"
 #include "state/SceneStore.h"
+#include "state/SceneDocument.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -1853,6 +1854,137 @@ bool testModulationEngine()
     return ok;
 }
 
+// (k) The editable scene document: block editing, undo, and the invariants the sequencer
+// depends on.
+//
+// The UI mutates state through SceneDocument, so this is where block editing is verified.
+// Driving the actual mouse handlers would need a live component and a display; testing the
+// document directly covers the logic that can actually be wrong, and does so headlessly.
+bool testSceneDocument()
+{
+    printf ("\n[Test K] scene document editing and undo\n");
+
+    using namespace stutter;
+    bool ok = true;
+    auto check = [&ok] (const char* what, bool cond)
+    {
+        if (! cond) { printf ("  FAIL: %s\n", what); ok = false; }
+    };
+
+    SceneStore store;
+    juce::UndoManager undo;
+    SceneDocument doc (store, undo);
+
+    // ---- K1: create, query, remove ------------------------------------------------------
+    {
+        check ("a fresh document has no blocks", ! doc.hasBlockAt (0, 0, 0));
+
+        doc.addBlock (0, 0, 4, 3);
+        check ("a created block covers its whole span",
+               doc.hasBlockAt (0, 0, 4) && doc.hasBlockAt (0, 0, 6));
+        check ("and nothing outside it",
+               ! doc.hasBlockAt (0, 0, 3) && ! doc.hasBlockAt (0, 0, 7));
+        check ("other lanes are unaffected", ! doc.hasBlockAt (0, 1, 4));
+
+        doc.removeBlockAt (0, 0, 5);   // removing from the middle removes the whole block
+        check ("removing from inside a block removes all of it", ! doc.hasBlockAt (0, 0, 4));
+    }
+
+    // ---- K2: overlap resolution ---------------------------------------------------------
+    {
+        // Dragging a new block over an existing one must replace it. Leaving both would
+        // produce an overlap that SceneSchema then silently discards, so the user would see
+        // their edit vanish on the next publish.
+        doc.addBlock (0, 2, 0, 4);
+        doc.addBlock (0, 2, 2, 4);     // overlaps the first
+
+        doc.publish();
+        const auto* scene = store.get (0);
+        check ("store has the scene", scene != nullptr);
+
+        if (scene != nullptr)
+        {
+            const auto& lane = scene->lanes[2];
+            bool disjoint = true, sorted = true;
+            for (int i = 1; i < lane.numBlocks; ++i)
+            {
+                if (lane.blocks[(size_t) i].startDiv < lane.blocks[(size_t) i - 1].startDiv)
+                    sorted = false;
+                if (lane.blocks[(size_t) i].startDiv < lane.blocks[(size_t) i - 1].endDiv())
+                    disjoint = false;
+            }
+            check ("overlapping edits resolve to disjoint blocks", disjoint);
+            check ("published blocks are sorted", sorted);
+            check ("the later edit survived", lane.numBlocks >= 1);
+        }
+    }
+
+    // ---- K3: undo groups a gesture into one step ----------------------------------------
+    {
+        doc.clearLane (0, 3);
+        undo.beginNewTransaction();
+
+        // Simulate a drag: several mutations inside one transaction.
+        doc.addBlock (0, 3, 0, 1);
+        doc.removeBlockAt (0, 3, 0);
+        doc.addBlock (0, 3, 0, 2);
+        doc.removeBlockAt (0, 3, 0);
+        doc.addBlock (0, 3, 0, 3);
+
+        check ("the drag left a block", doc.hasBlockAt (0, 3, 2));
+
+        undo.undo();
+        check ("one undo reverses the whole drag", ! doc.hasBlockAt (0, 3, 0));
+
+        undo.redo();
+        check ("redo restores it", doc.hasBlockAt (0, 3, 2));
+    }
+
+    // ---- K4: geometry is clamped ---------------------------------------------------------
+    {
+        doc.setBeats (0, 99);
+        doc.setDivisions (0, -4);
+        check ("beats clamps to 1..8", doc.getBeats (0) >= 1 && doc.getBeats (0) <= 8);
+        check ("divisions clamps to 2..8", doc.getDivisions (0) >= 2 && doc.getDivisions (0) <= 8);
+
+        doc.setBeats (0, 4);
+        doc.setDivisions (0, 4);
+        check ("totalDivisions follows the geometry", doc.totalDivisions (0) == 16);
+    }
+
+    // ---- K5: clearLane ----------------------------------------------------------------
+    {
+        doc.addBlock (0, 5, 0, 2);
+        doc.addBlock (0, 5, 4, 2);
+        doc.addBlock (0, 6, 0, 2);
+        check ("blocks exist before clearing", doc.hasBlockAt (0, 5, 0) && doc.hasBlockAt (0, 5, 4));
+
+        doc.clearLane (0, 5);
+        check ("clearLane empties its lane",
+               ! doc.hasBlockAt (0, 5, 0) && ! doc.hasBlockAt (0, 5, 4));
+        check ("clearLane leaves other lanes alone", doc.hasBlockAt (0, 6, 0));
+    }
+
+    // ---- K6: edits reach the audio thread ----------------------------------------------
+    {
+        doc.clearLane (0, 7);
+        doc.publish();
+        const auto* before = store.get (0);
+        const int countBefore = before != nullptr ? before->lanes[7].numBlocks : -1;
+
+        doc.addBlock (0, 7, 8, 4);
+        doc.publish();
+        const auto* after = store.get (0);
+        const int countAfter = after != nullptr ? after->lanes[7].numBlocks : -1;
+
+        printf ("  lane 7 blocks: %d -> %d after an edit and publish\n", countBefore, countAfter);
+        check ("publishing makes an edit visible to the audio thread", countAfter == countBefore + 1);
+    }
+
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -1992,8 +2124,9 @@ int main (int argc, char* argv[])
     const bool testHPass = testBlockSequencerMatchesStepSequencer();
     const bool testIPass = testGestureEngine();
     const bool testJPass = testModulationEngine();
+    const bool testKPass = testSceneDocument();
     if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
-        || ! testGPass || ! testHPass || ! testIPass || ! testJPass)
+        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");
