@@ -76,7 +76,6 @@ CI(macOS 14、Apple Silicon + Intel ユニバーサル)で以下を通過して�
   シーケンサー刷新時に基準を更新しましたが、差分は実測で最大1LSB / 24bit
   (≒ −138 dBFS)の浮動小数点丸め差であり、聴感上の変化ではありません
 - `pluginval --strictness-level 8`(VST3)/ `auval`(AU)
-- Developer ID 署名 + Apple 公証
 
 ### インストール
 
@@ -87,6 +86,25 @@ CI(macOS 14、Apple Silicon + Intel ユニバーサル)で以下を通過して�
 | VST3 | `~/Library/Audio/Plug-Ins/VST3/` |
 | Audio Unit | `~/Library/Audio/Plug-Ins/Components/` |
 | Standalone | 任意の場所(`/Applications` など) |
+
+#### ⚠️ このビルドは署名・公証されていません
+
+初回起動時に macOS が「開発元を確認できないため開けません」と表示してブロックします。
+署名証明書が未設定のため、ad-hoc 署名のみのビルドになっています。
+
+開くには、以下のいずれかを行ってください。
+
+- **Finder で右クリック →「開く」**(Standalone アプリの場合)
+- **システム設定 → プライバシーとセキュリティ**で「このまま開く」を選ぶ
+- ターミナルで隔離属性を外す:
+
+  ```sh
+  xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Stutter.vst3
+  xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Stutter.component
+  ```
+
+DAW によってはプラグインスキャンで弾かれる場合があります。その場合も上記の
+`xattr` コマンドで解決します。
 
 使いかたは [MANUAL.md](docs/MANUAL.md) を参照してください。
 
