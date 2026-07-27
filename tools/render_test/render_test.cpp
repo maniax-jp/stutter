@@ -34,6 +34,7 @@
 #include "dsp/effects/CrushEffect.h"
 #include "dsp/BlockSequencer.h"
 #include "dsp/GestureEngine.h"
+#include "dsp/ModulationEngine.h"
 #include "state/SceneSchema.h"
 #include "state/SceneSnapshot.h"
 #include "state/SceneStore.h"
@@ -1576,6 +1577,193 @@ bool testGestureEngine()
     return ok;
 }
 
+// (j) Modulation matrix: routing, precedence, speed multiplier, and the CPU budget.
+//
+// The budget check is not optional decoration. 16 curves x 12 lanes x 12 params evaluated
+// per sample is millions of lookups a second; a plugin that glitches at 128-sample buffers
+// is a failed plugin regardless of how expressive its modulation is. The mitigations (route
+// list + control-rate evaluation) are only worth having if they are measured.
+bool testModulationEngine()
+{
+    printf ("\n[Test J] modulation matrix\n");
+
+    using namespace stutter;
+    bool ok = true;
+    auto check = [&ok] (const char* what, bool cond)
+    {
+        if (! cond) { printf ("  FAIL: %s\n", what); ok = false; }
+    };
+
+    // Build a scene with one curve routed to lane 6 (Filter) param 1 (cutoff).
+    auto makeScene = [] (float depth, float speed, bool bipolar, float baseValue)
+    {
+        SceneSnapshot s {};
+        s.beats = 4; s.divisions = 4;
+        s.lanes[6].params[1] = baseValue;
+
+        // A saw ramp 0 -> 1 across the cycle, so the phase->value mapping is unambiguous.
+        std::vector<CurvePointV2> pts {
+            { 0.0f, 0.0f, 0.0f, PointWeight::Hard },
+            { 1.0f, 1.0f, 0.0f, PointWeight::Hard }
+        };
+        SceneSchema::bakeCurveTable (pts, s.curves[0].table.data(), CurveSnapshot::tableSize);
+        s.curves[0].targetParam = paramIndex (6, 1);
+        s.curves[0].depth = depth;
+        s.curves[0].speedMultiplier = speed;
+        s.curves[0].bipolar = bipolar;
+        s.curves[0].enabled = true;
+        s.activeCurves[0] = 0;
+        s.numActiveCurves = 1;
+        return s;
+    };
+
+    // ---- J1: an unrouted scene leaves parameters at their base ------------------------
+    {
+        SceneSnapshot plain {};
+        plain.lanes[6].params[1] = 0.42f;
+        ModulationEngine eng;
+        eng.prepare (kSampleRate);
+        const float* v = eng.nextSample (plain, 0.0);
+        check ("unrouted parameter reads its scene value",
+               std::abs (v[paramIndex (6, 1)] - 0.42f) < 1.0e-5f);
+        check ("hasActiveRoutes reports nothing to do", ! ModulationEngine::hasActiveRoutes (plain));
+    }
+
+    // ---- J2: a routed curve sweeps the parameter --------------------------------------
+    {
+        const auto scene = makeScene (1.0f, 1.0f, false, 0.0f);
+        ModulationEngine eng;
+        eng.prepare (kSampleRate);
+
+        // Sample the curve at phase 0 and phase ~0.75. With depth 1 and a 0->1 ramp the
+        // value should track the phase.
+        const float atStart = eng.nextSample (scene, 0.0)[paramIndex (6, 1)];
+
+        // Advance enough samples for the control-rate interpolation to land.
+        for (int i = 0; i < 64; ++i) eng.nextSample (scene, 0.75);
+        const float atThreeQuarters = eng.nextSample (scene, 0.75)[paramIndex (6, 1)];
+
+        printf ("  routed cutoff: phase 0.00 -> %.4f, phase 0.75 -> %.4f\n",
+                atStart, atThreeQuarters);
+        check ("curve drives its target", atThreeQuarters > atStart + 0.5f);
+        check ("value stays in range", atThreeQuarters <= 1.0f && atStart >= 0.0f);
+    }
+
+    // ---- J3: precedence -- automation moves the base, the curve offsets from it -------
+    {
+        ModulationEngine engLow, engHigh;
+        engLow.prepare (kSampleRate);
+        engHigh.prepare (kSampleRate);
+
+        // Same curve, different base values. A depth of 0.5 on a unipolar curve interpolates
+        // halfway from the base toward the curve, so a higher base must yield a higher result
+        // at the same phase -- i.e. the base is genuinely the starting point.
+        const auto low  = makeScene (0.5f, 1.0f, false, 0.2f);
+        const auto high = makeScene (0.5f, 1.0f, false, 0.8f);
+
+        for (int i = 0; i < 64; ++i) { engLow.nextSample (low, 0.0); engHigh.nextSample (high, 0.0); }
+        const float lowV  = engLow.nextSample (low, 0.0)[paramIndex (6, 1)];
+        const float highV = engHigh.nextSample (high, 0.0)[paramIndex (6, 1)];
+
+        printf ("  base 0.2 -> %.4f, base 0.8 -> %.4f (curve identical)\n", lowV, highV);
+        check ("a higher base yields a higher modulated value", highV > lowV);
+    }
+
+    // ---- J4: speed multiplier -----------------------------------------------------------
+    {
+        // Probed at pattern phase 0.25, NOT 0.5. At speed 2 a pattern phase of 0.5 maps to a
+        // curve phase of exactly 1.0, which wraps to 0 -- the saw's discontinuity lands
+        // precisely on the probe, so the reading is 0.0 and says nothing about whether the
+        // multiplier works. 0.25 maps to 0.5 under speed 2, which is unambiguous.
+        const auto s1 = makeScene (1.0f, 1.0f, false, 0.0f);
+        const auto s2 = makeScene (1.0f, 2.0f, false, 0.0f);
+
+        ModulationEngine e1, e2;
+        e1.prepare (kSampleRate); e2.prepare (kSampleRate);
+        for (int i = 0; i < 64; ++i) { e1.nextSample (s1, 0.25); e2.nextSample (s2, 0.25); }
+        const float v1 = e1.nextSample (s1, 0.25)[paramIndex (6, 1)];
+        const float v2 = e2.nextSample (s2, 0.25)[paramIndex (6, 1)];
+
+        printf ("  at pattern phase 0.25: speed 1x -> %.4f, speed 2x -> %.4f (want ~0.25 / ~0.50)\n",
+                v1, v2);
+        check ("speed 1x tracks the pattern phase", std::abs (v1 - 0.25f) < 0.02f);
+        check ("speed 2x advances the curve twice as fast", std::abs (v2 - 0.50f) < 0.02f);
+    }
+
+    // ---- J5: modulation is smooth, not stepped -----------------------------------------
+    {
+        // Control-rate evaluation only works if the interpolation between evaluations is
+        // real. Without it a swept cutoff would move in 16-sample stairs and zipper.
+        const auto scene = makeScene (1.0f, 1.0f, false, 0.0f);
+        ModulationEngine eng;
+        eng.prepare (kSampleRate);
+
+        float prev = eng.nextSample (scene, 0.0)[paramIndex (6, 1)];
+        float maxStep = 0.0f;
+        const int steps = 2000;
+        for (int i = 1; i < steps; ++i)
+        {
+            const double phase = (double) i / (double) steps;
+            const float v = eng.nextSample (scene, phase)[paramIndex (6, 1)];
+            maxStep = juce::jmax (maxStep, std::abs (v - prev));
+            prev = v;
+        }
+        // A 0->1 sweep over 2000 samples averages 0.0005 per sample; allow generous headroom
+        // but reject anything resembling a 16-sample staircase (which would show ~0.008).
+        printf ("  max per-sample modulation step over a full sweep = %.6f\n", maxStep);
+        check ("modulation interpolates between control-rate updates", maxStep < 0.005f);
+    }
+
+    // ---- J6: CPU budget ------------------------------------------------------------------
+    {
+        // A fully-loaded scene: every curve routed, every lane populated. This is the worst
+        // case the design has to survive.
+        SceneSnapshot heavy {};
+        heavy.beats = 4; heavy.divisions = 4;
+        std::vector<CurvePointV2> pts {
+            { 0.0f, 0.0f, 0.0f, PointWeight::Hard },
+            { 0.5f, 1.0f, 0.3f, PointWeight::Hard },
+            { 1.0f, 0.0f, -0.3f, PointWeight::Hard }
+        };
+        for (int i = 0; i < maxCurves; ++i)
+        {
+            SceneSchema::bakeCurveTable (pts, heavy.curves[(size_t) i].table.data(),
+                                         CurveSnapshot::tableSize);
+            heavy.curves[(size_t) i].targetParam = (juce::int16) paramIndex (i % maxLanes, i % maxParamsPerLane);
+            heavy.curves[(size_t) i].depth = 1.0f;
+            heavy.curves[(size_t) i].speedMultiplier = 1.0f;
+            heavy.curves[(size_t) i].enabled = true;
+            heavy.activeCurves[(size_t) i] = (juce::int16) i;
+        }
+        heavy.numActiveCurves = maxCurves;
+
+        ModulationEngine eng;
+        eng.prepare (kSampleRate);
+
+        // Render 10 seconds of modulation and compare against wall clock.
+        const int totalSamples = (int) (kSampleRate * 10.0);
+        const double startTime = juce::Time::getMillisecondCounterHiRes();
+        double sink = 0.0;
+        for (int i = 0; i < totalSamples; ++i)
+        {
+            const double phase = (double) (i % 96000) / 96000.0;
+            const float* v = eng.nextSample (heavy, phase);
+            sink += v[0];   // keep the loop from being optimised away
+        }
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startTime;
+        const double realtimeMs = 10.0 * 1000.0;
+        const double cpuPercent = 100.0 * elapsedMs / realtimeMs;
+
+        printf ("  %d curves x %d slots: %.1f%% of realtime (budget 30%%)\n",
+                maxCurves, totalParamSlots, cpuPercent);
+        check ("fully-loaded modulation stays inside the CPU budget", cpuPercent < 30.0);
+        juce::ignoreUnused (sink);
+    }
+
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -1714,8 +1902,9 @@ int main (int argc, char* argv[])
     const bool testGPass = testSceneSchemaAndStore();
     const bool testHPass = testBlockSequencerMatchesStepSequencer();
     const bool testIPass = testGestureEngine();
+    const bool testJPass = testModulationEngine();
     if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
-        || ! testGPass || ! testHPass || ! testIPass)
+        || ! testGPass || ! testHPass || ! testIPass || ! testJPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");
