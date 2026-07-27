@@ -1,5 +1,11 @@
 # Stutter — Multi-FX Glitch Plugin (VST3 / AU, macOS)
 
+> **v2 開発中。** 本書の大部分は v1.1.2 の仕様を記述している。v2 で導入された
+> Scene / 可変長ブロック / MIDI ジェスチャ / モジュレーションマトリクスの設計は
+> 各ヘッダの doc comment を一次情報とすること(`src/state/SceneSnapshot.h`,
+> `src/dsp/BlockSequencer.h`, `src/dsp/GestureEngine.h`, `src/dsp/ModulationEngine.h`)。
+> DSP 回帰の判定基準は `tests/fixtures/golden/README.md`。
+
 ## コンセプト
 iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitch 2 / Sugar Bytes Effectrix 2 の「いいとこ取り」:
 - **Effectrix/Glitch 系**: ステップシーケンサーグリッドで複数エフェクトをパターン化

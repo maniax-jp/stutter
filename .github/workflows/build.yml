@@ -83,6 +83,18 @@ jobs:
             exit 1
           fi
 
+      - name: Verify DSP output against the v1.1.2 golden baseline
+        run: |
+          set -euo pipefail
+          # The v2 rewrite's core claim is that replacing the parameter model, the sequencer
+          # and the state layer did not change a single sample. This is what enforces it --
+          # see tests/fixtures/golden/README.md for when updating the baseline is legitimate.
+          if ! tests/fixtures/golden/verify-against-v1.sh \
+               "${BUILD_DIR}/tools/render_test/render_test"; then
+            echo "::error::DSP output diverged from the v1.1.2 baseline"
+            exit 1
+          fi
+
       - name: Verify universal binary (lipo)
         run: |
           set -euo pipefail

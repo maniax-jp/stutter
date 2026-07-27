@@ -19,6 +19,15 @@ repo_root="$(cd "$script_dir/../../.." && pwd)"
 render_test="${1:-$repo_root/build/tools/render_test/render_test}"
 checksums="$script_dir/v1-lane-renders.sha256"
 
+# Resolve to an absolute path before we cd into the temp directory to render. A relative
+# path (as CI naturally supplies) would otherwise fail to resolve from there, and the
+# resulting "binary not found" surfaces as a baseline MISMATCH rather than as the setup
+# error it actually is.
+case "$render_test" in
+    /*) ;;
+    *)  render_test="$(cd "$(dirname "$render_test")" 2>/dev/null && pwd)/$(basename "$render_test")" ;;
+esac
+
 if [[ ! -x "$render_test" ]]; then
     echo "error: render_test not found or not executable: $render_test" >&2
     echo "hint: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSTUTTER_BUILD_TESTS=ON" >&2
