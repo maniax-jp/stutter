@@ -3,12 +3,12 @@
 # Local plugin-format validation: the gates CI runs, runnable before pushing a tag.
 #
 # Relying on CI alone cost a full release cycle -- v2.0.0's first build failed at pluginval
-# after every local test had passed. This closes that gap for VST3.
+# after every local test had passed. This closes that gap for both formats.
 #
-# auval is attempted but expected to fail on this machine: no third-party AU registers here,
-# including shipping commercial plugins (verified against AmpliTube 5, which fails the same
-# way). That is an environment condition, not a plugin defect, so it is reported and does not
-# fail the run. CI is still the authority for AU.
+# auval needs the AU to be registered with Core Audio, which can silently stop working until
+# the machine is restarted: the AU registry once reported only Apple's own components here
+# while dozens of installed commercial plugins were equally invisible. The script tells that
+# state apart from a real rejection rather than blaming the plugin for it.
 #
 # Usage: tools/validate.sh [build-dir]
 
@@ -82,10 +82,11 @@ else
     # whether ANY third-party AU is visible. Without this the message would blame the plugin.
     third_party=$(auval -a 2>/dev/null | grep -E "^au" | awk '{print $3}' | grep -cv appl || true)
     if [[ "$third_party" -eq 0 ]]; then
-        echo "SKIP: auval cannot see any third-party AU on this machine (only Apple's)."
-        echo "      Shipping commercial plugins fail here identically, so this says nothing"
-        echo "      about Stutter. CI validates the AU."
+        echo "SKIP: Core Audio has no third-party AU registered at all (only Apple's), so"
+        echo "      every installed plugin is equally invisible and this says nothing about"
+        echo "      Stutter. Restarting the machine has fixed this before; killing"
+        echo "      AudioComponentRegistrar and clearing the AU cache did not."
     else
-        fail "auval rejected the AU (other third-party AUs do register here, so this is real)"
+        fail "auval rejected the AU (${third_party} third-party AUs do register here, so this is real)"
     fi
 fi

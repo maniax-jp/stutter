@@ -401,12 +401,18 @@ tools/validate.sh          # VST3 を strictness 8 で検証
 ローカルで45秒かけて**合格**し、CI では同じテストがタイムアウトした(修正後は16秒)。
 `validate.sh` は30秒を超えると警告する。
 
-**auval はこの開発機では実行できない。** 第三者製 AU が1つも登録されず、
-`auval -a` は Apple 製58個しか返さない。`/Library/Audio/Plug-Ins/Components` には
-市販プラグインが多数入っているが、AmpliTube 5 で試しても同じ
-`didn't find the component` で失敗する。環境要因でありプラグインの問題ではないので、
-`validate.sh` はこれを SKIP として報告する(第三者製 AU が1つでも登録されている環境
-では、その場合のみ本当の失敗として扱う)。AU の検証は CI が担う。
+**auval が `didn't find the component` を返す場合は、まず macOS を再起動すること。**
+Core Audio の AU 登録は壊れることがあり、その状態では `auval -a` が Apple 製しか
+返さない。実際に一度そうなっており、市販プラグイン(AmpliTube 5 など)も同じく
+不可視だった。`AudioComponentRegistrar` の kill、`launchctl kickstart`、AU キャッシュ
+削除のいずれも効かず、**再起動で解消した**(復旧後は 390 個中 332 個が第三者製)。
+
+`validate.sh` はこの状態を「第三者製 AU が1つも見えない」ことで判定し、SKIP として
+報告する。1つでも見えていれば auval の失敗は本物として扱う。
+
+なお auval は `MusicDeviceMIDIEvent を実装しているが type が aufx` という警告を出す。
+MIDI を受けるが `aumf` ではないためで、**CI でも同じ警告が出た上で PASS している**。
+現状の既知事項。
 
 ### CI
 
