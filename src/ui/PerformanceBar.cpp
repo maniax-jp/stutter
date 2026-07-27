@@ -85,6 +85,65 @@ PerformanceBar::PerformanceBar (StutterAudioProcessor& processor, SceneDocument&
     };
     addAndMakeVisible (releaseBox);
 
+    styleCaption (gridLabel);
+    addAndMakeVisible (gridLabel);
+
+    for (int b = 1; b <= 8; ++b)
+        beatsBox.addItem (juce::String (b), b);
+    beatsBox.setTooltip ("Beats in the pattern. The grid gets longer; the blocks already on it "
+                         "keep their positions.");
+    beatsBox.onChange = [this]
+    {
+        if (updatingFromModel)
+            return;
+        doc.getUndoManager().beginNewTransaction();
+        doc.setBeats (sceneIndex, beatsBox.getSelectedId());
+        doc.publish();
+        proc.getPresetManager().markDirty();
+        if (onGridGeometryChanged) onGridGeometryChanged();
+    };
+    addAndMakeVisible (beatsBox);
+
+    styleCaption (gridTimesLabel);
+    gridTimesLabel.setJustificationType (juce::Justification::centred);
+    addAndMakeVisible (gridTimesLabel);
+
+    // 2..8: 3 and 6 give triplets and 5/7 give the odd grids, without a separate rate table.
+    for (int d = 2; d <= 8; ++d)
+        divisionsBox.addItem (juce::String (d), d);
+    divisionsBox.setTooltip ("Steps per beat. 3 or 6 gives triplets, 5 or 7 gives odd grids.");
+    divisionsBox.onChange = [this]
+    {
+        if (updatingFromModel)
+            return;
+        doc.getUndoManager().beginNewTransaction();
+        doc.setDivisions (sceneIndex, divisionsBox.getSelectedId());
+        doc.publish();
+        proc.getPresetManager().markDirty();
+        if (onGridGeometryChanged) onGridGeometryChanged();
+    };
+    addAndMakeVisible (divisionsBox);
+
+    styleCaption (swingLabel);
+    addAndMakeVisible (swingLabel);
+
+    swingSlider.setRange (-1.0, 1.0, 0.01);
+    swingSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 42, 18);
+    swingSlider.setTooltip ("Pushes every other step late (or early, below zero). The pattern "
+                            "keeps its length -- this is groove, not a tempo change.");
+    swingSlider.onValueChange = [this]
+    {
+        if (updatingFromModel)
+            return;
+        doc.setSwing (sceneIndex, (float) swingSlider.getValue());
+        doc.publish();
+        proc.getPresetManager().markDirty();
+        if (onGridGeometryChanged) onGridGeometryChanged();
+    };
+    // One undo entry per drag, not one per pixel.
+    swingSlider.onDragStart = [this] { doc.getUndoManager().beginNewTransaction(); };
+    addAndMakeVisible (swingSlider);
+
     sceneLockToggle.setTooltip ("Notes stop choosing scenes and only gate, so you can edit one "
                                 "scene while a track plays notes that would otherwise steal focus.");
     sceneLockToggle.onClick = [this]
@@ -149,6 +208,14 @@ void PerformanceBar::refresh()
                        ? juce::jlimit (0, 4, (int) scene.getProperty (SceneIDs::releaseMode, 0))
                        : 0;
     releaseBox.setSelectedId (mode + 1, juce::dontSendNotification);
+
+    beatsBox.setSelectedId (juce::jlimit (1, 8, doc.getBeats (sceneIndex)),
+                            juce::dontSendNotification);
+    divisionsBox.setSelectedId (juce::jlimit (2, 8, doc.getDivisions (sceneIndex)),
+                                juce::dontSendNotification);
+
+    const float swing = scene.isValid() ? (float) scene.getProperty (SceneIDs::swing, 0.0f) : 0.0f;
+    swingSlider.setValue (juce::jlimit (-1.0f, 1.0f, swing), juce::dontSendNotification);
 }
 
 void PerformanceBar::timerCallback()
@@ -184,11 +251,22 @@ void PerformanceBar::resized()
         r.removeFromLeft (12);
     };
 
-    placeField (playModeLabel, playModeBox, 34, 74);
-    placeField (quantizeLabel, quantizeBox, 44, 74);
-    placeField (releaseLabel, releaseBox, 52, 82);
+    placeField (playModeLabel, playModeBox, 34, 66);
+    placeField (quantizeLabel, quantizeBox, 44, 68);
+    placeField (releaseLabel, releaseBox, 52, 76);
 
-    sceneLockToggle.setBounds (r.removeFromLeft (74));
+    // Grid: beats x divisions reads as one control, so the two boxes stay tight around the "x".
+    gridLabel.setBounds (r.removeFromLeft (30));
+    beatsBox.setBounds (r.removeFromLeft (46).reduced (0, 3));
+    gridTimesLabel.setBounds (r.removeFromLeft (16));
+    divisionsBox.setBounds (r.removeFromLeft (46).reduced (0, 3));
+    r.removeFromLeft (12);
+
+    swingLabel.setBounds (r.removeFromLeft (38));
+    swingSlider.setBounds (r.removeFromLeft (150).reduced (0, 2));
+    r.removeFromLeft (12);
+
+    sceneLockToggle.setBounds (r.removeFromLeft (70));
 }
 
 } // namespace stutter::ui

@@ -178,6 +178,9 @@ private:
     /** Which scene APVTS currently reflects; -1 before the first mirror. */
     int mirroredScene = -1;
 
+    /** PPQ the pattern was pinned at by a Stick release; -1 when not frozen. Audio thread. */
+    double frozenPpq = -1.0;
+
     /** One per lane parameter, so the callback already knows which lane and slot it is for
         rather than parsing "lane3_decay" back apart on every knob move. */
     struct LaneParamWriteback : juce::AudioProcessorValueTreeState::Listener

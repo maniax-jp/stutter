@@ -219,7 +219,63 @@ public:
         return getBeats (sceneIndex) * getDivisions (sceneIndex);
     }
 
+    /** Per-lane mute/solo. Stored on the scene's <Lane> node beside its parameters, so each
+        scene keeps its own mix -- muting a lane to audition one key does not silence it
+        everywhere. */
+    bool isLaneMuted (int sceneIndex, int lane) { return laneFlag (sceneIndex, lane, SceneIDs::mute); }
+    bool isLaneSoloed (int sceneIndex, int lane) { return laneFlag (sceneIndex, lane, SceneIDs::solo); }
+
+    void toggleLaneMute (int sceneIndex, int lane)
+    {
+        setLaneFlag (sceneIndex, lane, SceneIDs::mute, ! isLaneMuted (sceneIndex, lane));
+    }
+
+    void toggleLaneSolo (int sceneIndex, int lane)
+    {
+        setLaneFlag (sceneIndex, lane, SceneIDs::solo, ! isLaneSoloed (sceneIndex, lane));
+    }
+
 private:
+    /** The scene's <Lane> node for `lane`, created if absent. Shared by the flag accessors so
+        they agree with mirrorActiveSceneToApvts about where lane state lives. */
+    juce::ValueTree laneNode (int sceneIndex, int lane, bool createIfMissing)
+    {
+        auto scene = ensureScene (sceneIndex);
+        if (! scene.isValid() || lane < 0 || lane >= maxLanes)
+            return {};
+
+        auto laneParams = createIfMissing
+                            ? scene.getOrCreateChildWithName (SceneIDs::laneParams, nullptr)
+                            : scene.getChildWithName (SceneIDs::laneParams);
+        if (! laneParams.isValid())
+            return {};
+
+        for (int i = 0; i < laneParams.getNumChildren(); ++i)
+            if ((int) laneParams.getChild (i).getProperty (SceneIDs::index, -1) == lane)
+                return laneParams.getChild (i);
+
+        if (! createIfMissing)
+            return {};
+
+        juce::ValueTree n (SceneIDs::lane);
+        n.setProperty (SceneIDs::index, lane, nullptr);
+        laneParams.appendChild (n, nullptr);
+        return n;
+    }
+
+    bool laneFlag (int sceneIndex, int lane, const juce::Identifier& id)
+    {
+        auto n = laneNode (sceneIndex, lane, false);
+        return n.isValid() && (bool) n.getProperty (id, false);
+    }
+
+    void setLaneFlag (int sceneIndex, int lane, const juce::Identifier& id, bool value)
+    {
+        auto n = laneNode (sceneIndex, lane, true);
+        if (n.isValid())
+            n.setProperty (id, value, &undoManager);
+    }
+
     static int countBlocksInLane (const juce::ValueTree& blocks, int lane)
     {
         int n = 0;

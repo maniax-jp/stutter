@@ -25,6 +25,10 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
 
     blockGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
 
+    // Beats/divisions/swing change the grid's shape, so it has to redraw against the new
+    // geometry rather than keep painting the old division count.
+    performanceBar.onGridGeometryChanged = [this] { blockGrid.repaint(); };
+
     // Picking a scene in the browser points the grid at it, so the two panes always show the
     // same scene rather than drifting apart.
     sceneBrowser.onSceneSelected = [this] (int sceneIndex)

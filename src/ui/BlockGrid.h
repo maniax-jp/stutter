@@ -68,6 +68,12 @@ private:
 
     HitInfo hitTestGrid (juce::Point<int> p) const;
 
+    /** True when the point is on a lane's mute/solo dot rather than the rest of its label. */
+    bool hitTestLaneDot (juce::Point<int> p, int lane) const;
+
+    /** True when any lane in this scene is soloed, which silences the rest. */
+    bool anyLaneSoloed() const;
+
     juce::Rectangle<int> getGridArea() const;
     juce::Rectangle<int> getLabelArea() const;
     juce::Rectangle<float> getCellBounds (int lane, int division) const;

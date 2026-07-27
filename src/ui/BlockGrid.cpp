@@ -61,6 +61,30 @@ juce::Rectangle<float> BlockGrid::getCellBounds (int lane, int division) const
              rowH - rowGap };
 }
 
+bool BlockGrid::anyLaneSoloed() const
+{
+    for (int l = 0; l < maxLanes; ++l)
+        if (doc.isLaneSoloed (sceneIndex, l))
+            return true;
+    return false;
+}
+
+bool BlockGrid::hitTestLaneDot (juce::Point<int> p, int lane) const
+{
+    const auto labelArea = getLabelArea();
+    if (lane < 0 || lane >= maxLanes)
+        return false;
+
+    const float rowH = (float) labelArea.getHeight() / (float) maxLanes;
+    const auto row = juce::Rectangle<float> ((float) labelArea.getX(),
+                                             (float) labelArea.getY() + (float) lane * rowH,
+                                             (float) labelArea.getWidth(), rowH);
+
+    // The dot is 4px, which is far too small to hit reliably; the target is the padding
+    // around it, which is dead space otherwise.
+    return juce::Rectangle<float> (row.getX(), row.getY(), 14.0f, rowH).contains (p.toFloat());
+}
+
 BlockGrid::HitInfo BlockGrid::hitTestGrid (juce::Point<int> p) const
 {
     HitInfo info;
@@ -141,6 +165,22 @@ void BlockGrid::mouseDown (const juce::MouseEvent& e)
 
     if (hit.onLabel)
     {
+        // The category dot doubles as the mute button, and alt-click on it solos. Putting
+        // both on the dot keeps the rest of the row a plain "select this lane" target, so
+        // the common action stays a single unmodified click.
+        if (hitTestLaneDot (e.getPosition(), hit.lane))
+        {
+            doc.getUndoManager().beginNewTransaction();
+            if (e.mods.isAltDown())
+                doc.toggleLaneSolo (sceneIndex, hit.lane);
+            else
+                doc.toggleLaneMute (sceneIndex, hit.lane);
+            doc.publish();
+            proc.getPresetManager().markDirty();
+            repaint();
+            return;
+        }
+
         selectedLane = hit.lane;
         if (onLaneSelected)
             onLaneSelected (selectedLane);
@@ -328,9 +368,31 @@ void BlockGrid::paint (juce::Graphics& g)
                     juce::Justification::centredLeft, false);
 
         // Category dot: the Buffer/Texture distinction governs whether lanes are exclusive
-        // or stack, and it is otherwise invisible in the grid.
-        g.setColour (accent.withAlpha (0.9f));
-        g.fillEllipse (row.getX() + 4.0f, row.getCentreY() - 2.0f, 4.0f, 4.0f);
+        // or stack, and it is otherwise invisible in the grid. It doubles as the mute/solo
+        // control, so its state has to be readable at a glance:
+        //   filled       = normal
+        //   hollow       = muted
+        //   filled ring  = soloed
+        const bool muted = doc.isLaneMuted (sceneIndex, lane);
+        const bool soloed = doc.isLaneSoloed (sceneIndex, lane);
+        const auto dot = juce::Rectangle<float> (row.getX() + 4.0f, row.getCentreY() - 2.0f, 4.0f, 4.0f);
+
+        if (muted)
+        {
+            g.setColour (Palette::textLo.withAlpha (0.6f));
+            g.drawEllipse (dot, 1.0f);
+        }
+        else
+        {
+            g.setColour (accent.withAlpha (0.9f));
+            g.fillEllipse (dot);
+        }
+
+        if (soloed)
+        {
+            g.setColour (accent);
+            g.drawEllipse (dot.expanded (2.5f), 1.0f);
+        }
     }
 
     // --- Grid background and beat divisions --------------------------------------------
@@ -381,7 +443,15 @@ void BlockGrid::paint (juce::Graphics& g)
                                             (float) len * colW - colGap,
                                             rowH - rowGap);
 
-            const auto accent = Palette::laneColour (lane);
+            // A silenced lane's blocks are drawn washed out, so "why can't I hear this" is
+            // answered by the grid rather than by hunting for the dot. Solo silences the
+            // others, so it has to darken them the same way an explicit mute does.
+            const bool anySolo = anyLaneSoloed();
+            const bool silenced = doc.isLaneMuted (sceneIndex, lane)
+                                   || (anySolo && ! doc.isLaneSoloed (sceneIndex, lane));
+
+            const auto accent = silenced ? Palette::laneColour (lane).withSaturation (0.15f).darker (0.5f)
+                                         : Palette::laneColour (lane);
 
             // Tier is drawn as fill treatment rather than a badge: Locked is solid, Split
             // gets a gradient plus a direction arrow, Custom shows its curve inline. Seeing

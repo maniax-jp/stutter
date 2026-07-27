@@ -229,8 +229,21 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
                 lastChainOrderScene = gestureEngine.getActiveScene();
             }
 
+            // Stick release: hold the pattern where it stopped instead of letting it run on.
+            // Freezing the PPQ handed to the sequencer is what "freeze" means here -- the
+            // block cursor, division phase and modulation all derive from it, so pinning it
+            // stops every one of them together. Advancing it by 0 also keeps the effects
+            // reading the same slice, which is the sound the mode promises.
+            const bool frozen = gestureEngine.isFrozen();
+            if (frozen && frozenPpq < 0.0)
+                frozenPpq = ppqAtBlockStart;
+            else if (! frozen)
+                frozenPpq = -1.0;
+
             blockSequencer.processBlock (buffer, captureBuffer, *scene,
-                                         ppqAtBlockStart, ppqPerSample, &modulationEngine);
+                                         frozen ? frozenPpq : ppqAtBlockStart,
+                                         frozen ? 0.0 : ppqPerSample,
+                                         &modulationEngine);
         }
     }
 

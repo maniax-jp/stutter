@@ -580,3 +580,58 @@ TEST_CASE ("Release mode is stored per scene", "[state][gesture]")
     CHECK (sa->releaseMode == ReleaseMode::Latch);
     CHECK (sb->releaseMode == ReleaseMode::Instant);
 }
+
+TEST_CASE ("Grid geometry edits reach the audio path", "[document][geometry]")
+{
+    // setBeats/setDivisions/setSwing existed for a long time with no caller, so this covers
+    // the whole path the UI now uses: write, publish, and read back what the sequencer sees.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+
+    auto& doc = proc.getSceneDocument();
+    const int scene = ui::SceneBrowser::defaultScene;
+    doc.ensureScene (scene);
+
+    doc.setBeats (scene, 3);
+    doc.setDivisions (scene, 6);
+    doc.setSwing (scene, 0.4f);
+    doc.publish();
+
+    const auto* s = proc.getSceneStore().get (scene);
+    REQUIRE (s != nullptr);
+    CHECK (s->beats == 3);
+    CHECK (s->divisions == 6);
+    CHECK_THAT (s->swing, WithinAbs (0.4f, 1.0e-4f));
+    CHECK (s->totalDivisions() == 18);
+
+    SECTION ("out-of-range values clamp instead of corrupting the grid")
+    {
+        doc.setBeats (scene, 99);
+        doc.setDivisions (scene, 1);
+        doc.setSwing (scene, 5.0f);
+        doc.publish();
+
+        const auto* c = proc.getSceneStore().get (scene);
+        REQUIRE (c != nullptr);
+        CHECK ((c->beats >= 1 && c->beats <= 8));
+        CHECK ((c->divisions >= 2 && c->divisions <= 8));
+        CHECK ((c->swing >= -1.0f && c->swing <= 1.0f));
+    }
+
+    SECTION ("blocks keep their division positions when the grid grows")
+    {
+        doc.setBeats (scene, 2);
+        doc.setDivisions (scene, 4);
+        doc.addBlock (scene, 0, 3, 2);
+        doc.publish();
+
+        doc.setBeats (scene, 4);
+        doc.publish();
+
+        const auto* g = proc.getSceneStore().get (scene);
+        REQUIRE (g != nullptr);
+        REQUIRE (g->lanes[0].numBlocks == 1);
+        CHECK (g->lanes[0].blocks[0].startDiv == 3);
+        CHECK (g->lanes[0].blocks[0].lengthDiv == 2);
+    }
+}

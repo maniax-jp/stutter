@@ -36,6 +36,10 @@ public:
     /** Pull every control back from the model, after a preset load replaces it wholesale. */
     void refresh();
 
+    /** Fired when beats/divisions/swing change, so the grid can redraw against the new
+        geometry -- it caches nothing, but it only repaints when told to. */
+    std::function<void()> onGridGeometryChanged;
+
 private:
     void timerCallback() override;
     void pushReleaseModeToScene();
@@ -54,6 +58,17 @@ private:
     juce::ComboBox releaseBox;
 
     juce::ToggleButton sceneLockToggle { "LOCK" };
+
+    // Per-scene grid geometry. Changing these re-times the pattern rather than moving blocks:
+    // block positions are stored in divisions, so the same arrangement re-reads against the
+    // new grid instead of being rewritten.
+    juce::Label gridLabel { {}, "GRID" };
+    juce::ComboBox beatsBox;
+    juce::Label gridTimesLabel { {}, "x" };
+    juce::ComboBox divisionsBox;
+
+    juce::Label swingLabel { {}, "SWING" };
+    juce::Slider swingSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     // Guards the combo callbacks while refresh() writes into them, so restoring the UI from
     // the model is not mistaken for the user editing it and written straight back.

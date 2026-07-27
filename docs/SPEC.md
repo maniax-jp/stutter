@@ -50,8 +50,13 @@ v2 の設計判断で最も重要なのは、**編集用の状態と再生用の
 越しに読む構造体にヒープ所有メンバがあってはならないため。
 
 **publish は明示的**(マウスアップ時など)。プロパティ変更のたびに自動で走らせると、
-ドラッグ中に毎回約10MBのバンクを再構築することになる。ノブのドラッグのようなスカラー編集は
-`LiveParamOverlay`(lock-free)を通り、バンク再構築を起こさない。
+ドラッグ中に毎回約10MBのバンクを再構築することになる。
+
+ただし**ノブのドラッグは現状この対策の外にある**。当初は `LiveParamOverlay`(lock-free)
+を通す設計だったが、実装ではノブ編集は APVTS リスナー経由で
+`writeLaneParamToScene` がシーンへ書き戻し、その都度 `publish()` している。
+`LiveParamOverlay` は宣言されているだけで使われていない。実測でこれが問題になっては
+いないが、SPEC の元の意図とは異なる。
 
 **退役キュー**: 差し替えられたバンクは即座に解放せず、時間ベースのキューに入れて
 メッセージスレッドのタイマーで回収する。参照カウントにするとオーディオスレッドの読み取り
@@ -282,7 +287,7 @@ v1 はパラメータ定義が3箇所(`ParameterIDs.h` の ID、`ParameterLayout
 |---|---|
 | ヘッダ | ロゴ、プリセットブラウザ、Dry/Wet、Output、SEQ/SYNC トグル、BPM |
 | Scene ストリップ | 鍵盤表示。どのノートに Scene があるか、どれが鳴っているか、どれを編集中か |
-| 演奏バー | Play Mode / Quantize / Release / Scene Lock |
+| 演奏バー | Play Mode / Quantize / Release / Grid(Beats×Divisions)/ Swing / Scene Lock |
 | ブロックグリッド | 12レーン × 可変 division。可変長ブロックの描画・編集、発光プレイヘッド |
 | 下部タブ | LANE(選択レーンのパラメータ)/ VOLUME / FILTER / PAN(カーブ)/ MOD(ルーティング表) |
 
@@ -428,6 +433,12 @@ tools/render_test/  WAV レンダリング用ハーネス
 - **v1 の state は読まない**。バージョンガードで Init にフォールバックする(意図的な
   判断)。v1 の**プリセット**は上記のとおり v2 のブロックへ変換してロードされる
 - **ノート → Scene マッピングは identity 固定**。`setNoteMapping` は実装済みだが UI がない
+- **`loopPolicy` は Forward のみ実装**。Palindrome / OneShot は保存・復元されるが
+  `BlockSequencer` は PPQ から位置を導くだけで常に前進し、`reverseDirection` は false 固定。
+  設定する UI が無いためユーザーが未実装パスに到達することはない
+- **`LiveParamOverlay` は未使用**。ノブ編集は APVTS 経由でシーンへ書き戻される
+  (`writeLaneParamToScene`)。SPEC が想定した「バンク再構築を避ける高速パス」は
+  現状使っていない
 - **レート表示の4倍ずれ**は v1.1.2 まで存在した。ラベル側を実態に合わせて修正済みで、
   プリセットの音は不変。`stutter::legacyRateIndexLabels()` が唯一の定義
 - **オーバーサンプリングなし**。Crush / Distortion / Repitch は高設定でエイリアスする。

@@ -117,11 +117,25 @@ struct CurveSnapshot
 };
 
 /** Loop behaviour for a pattern, per scene. */
+/**
+    How a pattern repeats.
+
+    NOT IMPLEMENTED beyond Forward. The value is parsed, stored and round-trips through state,
+    but BlockSequencer derives its position from PPQ alone and always runs forward --
+    SampleContext::reverseDirection is hardcoded false. Palindrome needs the block cursor,
+    which is forward-only by design, to be rebuilt at each turnaround, and OneShot needs a
+    stop condition the sequencer has no concept of.
+
+    No UI sets this, so a user cannot reach the unimplemented paths; a hand-edited preset
+    would silently play Forward instead. Left in place rather than removed because the
+    schema round-trip is already covered by tests and dropping the field would be the harder
+    change to reverse.
+*/
 enum class LoopPolicy : uint8_t
 {
-    Forward = 0,   ///< Restart from zero at the end.
-    Palindrome,    ///< Reverse direction at each end (Stutter Edit 2's Palindrome).
-    OneShot        ///< Play once, then stop.
+    Forward = 0,   ///< Restart from zero at the end. The only behaviour implemented.
+    Palindrome,    ///< Reverse direction at each end (Stutter Edit 2's Palindrome). Not implemented.
+    OneShot        ///< Play once, then stop. Not implemented.
 };
 
 /** What happens when the MIDI note that triggered a scene is released. */

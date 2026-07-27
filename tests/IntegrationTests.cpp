@@ -932,3 +932,142 @@ TEST_CASE ("Editing one scene's knob does not leak into another", "[processor][m
     CHECK_THAT (a->lanes[0].params[1], WithinAbs (0.85f, 1.0e-4f));
     CHECK_THAT (b->lanes[0].params[1], WithinAbs (0.20f, 1.0e-4f));
 }
+
+TEST_CASE ("Lane mute and solo reach the audio path", "[processor][mix]")
+{
+    // BlockSequencer honoured mute/solo from the start, but nothing could set them, so this
+    // covers the whole path the grid's lane dot now drives.
+    auto render = [] (StutterAudioProcessor& proc)
+    {
+        const int total = (int) (stutter::test::sampleRate * 2.0);
+        juce::AudioBuffer<float> buf (2, total);
+        stutter::test::fillTestSignal (buf);
+        juce::AudioBuffer<float> dry (2, total);
+        dry.makeCopyOf (buf);
+
+        juce::MidiBuffer midi;
+        for (int off = 0; off < total; off += stutter::test::blockSize)
+        {
+            const int n = juce::jmin (stutter::test::blockSize, total - off);
+            juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off, n);
+            proc.processBlock (chunk, midi);
+        }
+
+        double diff = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int s = 0; s < total; ++s)
+                diff += std::abs (buf.getSample (c, s) - dry.getSample (c, s));
+        return diff / (double) (total * 2);
+    };
+
+    auto build = [] (StutterAudioProcessor& proc)
+    {
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        auto& doc = proc.getSceneDocument();
+        const int scene = proc.getGestureEngine().getActiveScene();
+        // Two lanes that each change the sound unmistakably on their own. Crush at its
+        // default bit depth is nearly transparent, so using it here would make "the other
+        // lane stopped" indistinguishable from "nothing happened".
+        for (int d = 0; d < 16; d += 2)
+        {
+            doc.addBlock (scene, StutterAudioProcessor::laneGate, d, 1);
+            doc.addBlock (scene, StutterAudioProcessor::laneReverse, d + 1, 1);
+        }
+        doc.publish();
+        return scene;
+    };
+
+    double baseline = 0.0;
+    {
+        StutterAudioProcessor proc;
+        build (proc);
+        baseline = render (proc);
+    }
+    REQUIRE (baseline > 1.0e-6);
+
+    SECTION ("muting every active lane silences the effect")
+    {
+        StutterAudioProcessor proc;
+        const int scene = build (proc);
+        proc.getSceneDocument().toggleLaneMute (scene, StutterAudioProcessor::laneGate);
+        proc.getSceneDocument().toggleLaneMute (scene, StutterAudioProcessor::laneReverse);
+        proc.getSceneDocument().publish();
+
+        CHECK (render (proc) < 1.0e-6);
+    }
+
+    SECTION ("soloing one lane silences the others")
+    {
+        StutterAudioProcessor proc;
+        const int scene = build (proc);
+        proc.getSceneDocument().toggleLaneSolo (scene, StutterAudioProcessor::laneGate);
+        proc.getSceneDocument().publish();
+
+        const double soloed = render (proc);
+        INFO ("baseline " << baseline << ", soloed " << soloed);
+        CHECK (soloed > 1.0e-6);                                 // the soloed lane still plays
+        CHECK (std::abs (soloed - baseline) > baseline * 0.01);  // the other one stopped
+    }
+}
+
+TEST_CASE ("Stick freezes the pattern where Latch keeps it running", "[processor][gesture]")
+{
+    // Stick used to set a flag nothing read, so it was audibly identical to Latch -- while
+    // the RELEASE menu offered both. Freezing pins the PPQ the sequencer sees, which stops
+    // the block cursor, the division phase and the modulation together.
+    auto renderAfterRelease = [] (stutter::ReleaseMode mode)
+    {
+        StutterAudioProcessor proc;
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        proc.getGestureEngine().setPlayMode (stutter::PlayMode::Midi);
+
+        auto& doc = proc.getSceneDocument();
+        const int scene = proc.getGestureEngine().getActiveScene();
+        auto sceneTree = doc.ensureScene (scene);
+        sceneTree.setProperty (SceneIDs::releaseMode, (int) mode, nullptr);
+
+        // A pattern whose lanes differ across the bar, so a frozen playhead and a running one
+        // cannot produce the same output.
+        // Only the first half of the bar has blocks. A running playhead leaves them behind
+        // and goes quiet; a frozen one stays on whichever division it stopped at. Gate is
+        // used throughout because it sounds in a single-division block, which Reverse does
+        // not -- a lane that is silent either way could not tell the two apart.
+        for (int d = 0; d < 8; ++d)
+            doc.addBlock (scene, StutterAudioProcessor::laneGate, d, 1);
+        doc.publish();
+
+        const int total = (int) (stutter::test::sampleRate * 2.0);
+        juce::AudioBuffer<float> buf (2, total);
+        stutter::test::fillTestSignal (buf);
+
+        for (int off = 0; off < total; off += stutter::test::blockSize)
+        {
+            const int n = juce::jmin (stutter::test::blockSize, total - off);
+            juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off, n);
+
+            juce::MidiBuffer midi;
+            if (off == 0)
+                midi.addEvent (juce::MidiMessage::noteOn (1, scene, 1.0f), 0);
+            else if (off == stutter::test::blockSize * 4)
+                midi.addEvent (juce::MidiMessage::noteOff (1, scene), 0);
+
+            proc.processBlock (chunk, midi);
+        }
+
+        // Only the tail matters: both modes are identical while the note is held.
+        double sum = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int s = total / 2; s < total; ++s)
+                sum += std::abs (buf.getSample (c, s));
+        return sum / (double) total;
+    };
+
+    const double stick = renderAfterRelease (stutter::ReleaseMode::Stick);
+
+    const double latch = renderAfterRelease (stutter::ReleaseMode::Latch);
+
+    INFO ("Stick " << stick << ", Latch " << latch);
+    CHECK (stick > 1.0e-6);
+    CHECK (latch > 1.0e-6);
+    CHECK (std::abs (stick - latch) > latch * 0.01);
+}
