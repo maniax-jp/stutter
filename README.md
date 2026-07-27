@@ -7,18 +7,31 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
 
 ![UI](docs/screenshot.png)
 
-> **v2 開発中**(ブランチ `v2-development`)。以下は v1.1.2 の機能一覧。
-> v2 で追加された Scene / 可変長ブロック / MIDI 演奏 / モジュレーションマトリクスは
-> `docs/SPEC.md` 冒頭の注記と各ヘッダの doc comment を参照。
-
 ## 機能
 
-- **8レーン × 16ステップのエフェクトシーケンサー**(ホストテンポ同期、停止時は内部クロック)
-  - Stutter(レート/ループ長減衰/ピッチスライド)、Tape Stop、Tape Start、Reverse、Repitch、Gate、Filter(SVF+LFO)、Crush
-  - Buffer系レーンは排他、Texture系レーンは重ねがけ可能。切替は等パワークロスフェードでクリックレス
-- **描画可能なカーブモジュレーター 3系統**(Volume / Filter / Pan)— ブレークポイント+曲率、プリセット形状6種、テンポ同期
-- **ファクトリープリセット 29個**(Init + Stutter系6 / Tape系5 / Gate&Sidechain系6 / Glitch系6 / Filter&Texture系5)+ ユーザープリセット(`~/Library/Audio/Presets/Maniax/Stutter/`)
-- カスタムダークUI(900×620、比率固定リサイズ、発光プレイヘッド、ドラッグ描画グリッド)
+- **MIDI ノートで切り替える 128 の Scene** — ブロック配置・全パラメータ・カーブを丸ごと
+  記憶したスナップショット。エフェクトを楽器のように演奏できる
+- **12レーン × 可変長ブロックのシーケンサー** — Beats 1〜8 × Divisions 2〜8 と Swing。
+  ブロックの「長さ」が音を決める(TapeStop が1小節かけて停止しきる、など)
+  - Buffer系: Stutter / TapeStop / TapeStart / Reverse / Repitch / Stretcher / Shuffler
+  - Texture系: Gate / Filter / Crush / Distortion
+  - Send系: Delay(フィードバックを直列チェーンから隔離)
+  - 切替は等パワークロスフェードでクリックレス
+- **ルーティング可能なモジュレーションマトリクス** — 任意のカーブを任意のレーン
+  パラメータへ。加えて v1 由来の Volume / Filter / Pan の3系統
+- **MIDI 演奏レイヤー** — Play Mode(Auto / MIDI)、トリガークオンタイズ(早入力を許す)、
+  Release モード5種(Scene ごと)、Scene Lock
+- **ファクトリーコンテンツ** — v2 Scene バンク4種(14シーン)+ v1 由来のプリセット28個。
+  ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/`
+- カスタムダークUI(1200×800、比率固定リサイズ、発光プレイヘッド、ドラッグ描画グリッド)
+
+> **v1.1.2 との互換性はありません。** v1 で保存したプロジェクトの状態は読み込まず、
+> Init にフォールバックします(バージョンガードによる意図的な判断)。v1 のファクトリー
+> プリセット28個は v2 のブロックへ変換して同梱しています。
+
+## 使いかた
+
+エンドユーザー向けの操作説明は **[MANUAL.md](docs/MANUAL.md)** を参照。
 
 ## ビルド
 
@@ -41,12 +54,23 @@ cmake --build build -j8
 
 ## 検証
 
-- `pluginval --strictness-level 8` パス(VST3)
-- AU: `auval -v aufx Stt1 Manx`
+CI(macos-14)が以下を順に実行し、どれか一つでも落ちればリリースは publish されない:
+
+- `ctest` — Catch2 スイート(54ケース / 2186アサーション)
+- `render_test` + **ゴールデンベースライン照合** — 8レーンのレンダリング結果を v1.1.2 と
+  SHA-256 で比較。DSP の意図しない変化を検出する
+- ユニバーサルバイナリ検証(`lipo`)
+- `pluginval --strictness-level 8`(VST3)
+- `auval -v aufx Stt1 Manx`(AU)
 
 ## ドキュメント
 
-仕様・State構造は [SPEC.md](docs/SPEC.md) を参照。
+| 文書 | 対象 |
+|---|---|
+| [MANUAL.md](docs/MANUAL.md) | 使いかた(音楽制作者向け) |
+| [SPEC.md](docs/SPEC.md) | 設計の意図・State スキーマ・既知の制約 |
+
+個々のクラスの詳細は各ヘッダの doc comment が一次情報。
 
 ## License
 
