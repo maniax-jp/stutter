@@ -304,11 +304,39 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
       - name: Download packaged artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.build.outputs.zip_name }}
           path: dist
+
+      - name: Extract this version's section from CHANGELOG.md
+        id: notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Everything between "## vX.Y.Z" and the next "## " heading. Missing section is not
+          # fatal: the release still publishes with the auto-generated commit list rather than
+          # failing a build that already passed every gate.
+          if [[ -f CHANGELOG.md ]] \
+             && awk -v v="## v${VERSION}" '$0 == v {found=1} END {exit !found}' CHANGELOG.md; then
+            awk -v v="## v${VERSION}" '
+              $0 == v {inside=1; next}
+              inside && /^## / {exit}
+              inside {print}
+            ' CHANGELOG.md > release-notes.md
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+            echo "Using CHANGELOG.md section for v${VERSION}"
+          else
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No '## v${VERSION}' section in CHANGELOG.md; falling back to generated notes"
+          fi
 
       - name: Verify zip present
         id: locate
@@ -331,6 +359,9 @@ jobs:
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: ${{ steps.locate.outputs.zip_path }}
+          # body_path wins when present; generate_release_notes then appends the commit list
+          # below it, so the hand-written notes lead and the generated detail follows.
+          body_path: ${{ steps.notes.outputs.has_notes == 'true' && 'release-notes.md' || '' }}
           generate_release_notes: true
           draft: false
           prerelease: false
