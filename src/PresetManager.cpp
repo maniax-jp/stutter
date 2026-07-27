@@ -1,7 +1,9 @@
 #include "PresetManager.h"
 #include "PluginProcessor.h"
 #include "FactoryPresets.h"
+#include "FactoryScenes.h"
 #include "dsp/ParameterIDs.h"
+#include "state/SceneSchema.h"
 
 namespace stutter
 {
@@ -157,6 +159,11 @@ juce::ValueTree buildFullStateTree (juce::AudioProcessorValueTreeState& apvts, c
 {
     auto tree = buildDefaultParametersTree (apvts);
 
+    // Without this every factory preset is indistinguishable from v1 state and gets rejected
+    // by setStateInformation's version guard, which silently substitutes Init -- so the whole
+    // factory bank loaded as silence while the browser showed the preset's name.
+    tree.setProperty (SceneIDs::version, stateSchemaVersion, nullptr);
+
     for (auto& pv : def.paramValues)
         setParamValue (tree, pv.paramId, pv.value);
 
@@ -203,10 +210,15 @@ void PresetManager::rebuildPresetList()
 {
     presets.clear();
 
-    presets.push_back ({ "Init", "Init", true, {} });
+    presets.push_back ({ "Init", "Init", true, {}, -1 });
+
+    // v2 scene banks first: these are what the plugin is now, and a user scrolling from the
+    // top should reach a playable multi-scene set before the single-patch legacy entries.
+    for (int b = 0; b < FactoryScenes::getNumBanks(); ++b)
+        presets.push_back ({ FactoryScenes::getBankName (b), "Scenes", true, {}, b });
 
     for (auto& def : getFactoryPresetDefs())
-        presets.push_back ({ def.name, def.category, true, {} });
+        presets.push_back ({ def.name, def.category, true, {}, -1 });
 
     refreshUserPresets();
 }
@@ -301,6 +313,24 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
             { "Pan",    true, 4, {} },
         };
         return buildFullStateTree (proc.getAPVTS(), initDef);
+    }
+
+    if (entry.sceneBankIndex >= 0)
+    {
+        // A scene bank carries no parameter values of its own: everything it needs lives in
+        // the <Scenes> node, and the per-lane values are mirrored out of the active scene
+        // once it loads. Start from the defaults so any previous patch's dialled-in settings
+        // do not leak through underneath.
+        FactoryPresetDef bare;
+        bare.name = entry.name;
+        bare.category = entry.category;
+        auto tree = buildFullStateTree (proc.getAPVTS(), bare);
+
+        auto scenes = FactoryScenes::createBank (entry.sceneBankIndex);
+        if (! scenes.isValid())
+            return {};
+        tree.appendChild (scenes, nullptr);
+        return tree;
     }
 
     for (auto& def : getFactoryPresetDefs())

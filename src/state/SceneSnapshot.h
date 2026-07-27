@@ -177,6 +177,17 @@ struct SceneSnapshot
     bool populated = false;
 
     int totalDivisions() const noexcept { return beats * divisions; }
+
+    /** True when any lane has at least one block. `populated` only says the slot was defined;
+        a scene can be defined and still be an empty grid, which sounds exactly like a missing
+        scene and so is not somewhere to land the playhead by default. */
+    bool hasAnyBlocks() const noexcept
+    {
+        for (const auto& lane : lanes)
+            if (lane.numBlocks > 0)
+                return true;
+        return false;
+    }
 };
 
 /** Maximum scenes in a bank: one per MIDI note. */

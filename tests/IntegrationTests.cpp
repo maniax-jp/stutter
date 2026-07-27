@@ -3,6 +3,7 @@
 
 #include "TestHelpers.h"
 #include "PresetManager.h"
+#include "FactoryScenes.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/ModulationEngine.h"
 
@@ -515,4 +516,134 @@ TEST_CASE ("A routed curve audibly changes the rendered output", "[effects][modu
     INFO ("modulated vs unmodulated: maxDiff " << maxDiff (plain, swept));
     CHECK (maxDiff (plain, swept) > 0.01);
     CHECK (analyze (swept).severeClickCount == 0);
+}
+
+// ---------------------------------------------------------------------------------------
+// Factory content has to be audible. Every preset once loaded as silence -- the version
+// guard rejected them all and substituted Init -- and nothing failed, because no test
+// asked whether choosing a preset changed the sound.
+// ---------------------------------------------------------------------------------------
+
+namespace
+{
+/** Mean absolute difference between the processed signal and the dry input. */
+double processedDelta (StutterAudioProcessor& proc)
+{
+    constexpr int numSamples = 48000;
+    juce::AudioBuffer<float> buf (2, numSamples);
+    stutter::test::fillTestSignal (buf);
+
+    juce::AudioBuffer<float> dry (2, numSamples);
+    dry.makeCopyOf (buf);
+
+    juce::MidiBuffer midi;
+    for (int off = 0; off < numSamples; off += 512)
+    {
+        const int len = juce::jmin (512, numSamples - off);
+        juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off, len);
+        proc.processBlock (chunk, midi);
+    }
+
+    double diff = 0.0;
+    for (int c = 0; c < 2; ++c)
+        for (int s = 0; s < numSamples; ++s)
+            diff += std::abs (buf.getSample (c, s) - dry.getSample (c, s));
+    return diff / (double) (numSamples * 2);
+}
+}
+
+TEST_CASE ("Factory presets are not silently substituted by Init", "[presets][audio]")
+{
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    const auto& entries = pm.getPresets();
+    REQUIRE (entries.size() > 1);
+
+    int audible = 0;
+    std::vector<juce::String> inert;
+
+    for (int i = 0; i < (int) entries.size(); ++i)
+    {
+        pm.loadPreset (i);
+        // Scene banks are MIDI-played, so in Auto mode only the scene the engine starts on
+        // sounds; that is enough to prove the bank reached the audio path at all.
+        if (processedDelta (proc) > 1.0e-6)
+            ++audible;
+        else if (entries[(size_t) i].name != "Init")
+            inert.push_back (entries[(size_t) i].name);
+    }
+
+    juce::String names;
+    for (auto& n : inert) names << n << ", ";
+    INFO ("presets leaving the signal untouched: " << (int) inert.size() << " -- " << names);
+    CHECK (inert.empty());
+    CHECK (audible > 0);
+}
+
+TEST_CASE ("Every factory scene bank reaches the audio path", "[presets][scenes]")
+{
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int banksSeen = 0;
+    for (const auto& e : pm.getPresets())
+    {
+        if (e.sceneBankIndex < 0)
+            continue;
+        ++banksSeen;
+
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == e.name)
+            {
+                idx = i;
+                break;
+            }
+        REQUIRE (idx >= 0);
+        pm.loadPreset (idx);
+
+        int populated = 0, blocks = 0;
+        for (int s = 0; s < stutter::maxScenes; ++s)
+            if (const auto* sn = proc.getSceneStore().get (s))
+                if (sn->populated)
+                {
+                    ++populated;
+                    for (int l = 0; l < stutter::maxLanes; ++l)
+                        blocks += sn->lanes[(size_t) l].numBlocks;
+                }
+
+        INFO ("bank: " << e.name);
+        CHECK (populated > 0);
+        CHECK (blocks > 0);
+    }
+
+    CHECK (banksSeen == FactoryScenes::getNumBanks());
+}
+
+TEST_CASE ("A freshly loaded preset is not marked dirty", "[presets][ui]")
+{
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int bankIdx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].sceneBankIndex >= 0)
+        {
+            bankIdx = i;
+            break;
+        }
+    REQUIRE (bankIdx >= 0);
+
+    pm.loadPreset (bankIdx);
+    CHECK_FALSE (pm.isDirty());
+
+    // The mirror runs on a timer, so it lands after loadPreset returns. It writes parameter
+    // values, and those writes must not read back as user edits -- otherwise every preset
+    // shows as modified the instant it is chosen.
+    proc.pumpSceneMirror();
+    CHECK_FALSE (pm.isDirty());
 }

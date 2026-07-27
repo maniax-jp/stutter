@@ -13,9 +13,14 @@ namespace stutter
 struct PresetEntry
 {
     juce::String name;
-    juce::String category;   // "Stutter", "Tape", "Gate & Sidechain", "Glitch", "Filter & Texture", "User"
+    juce::String category;   // "Scenes", "Stutter", "Tape", "Gate & Sidechain", "Glitch", "Filter & Texture", "User"
     bool isFactory = true;
     juce::File userFile;     // valid only when isFactory == false
+
+    /** >= 0 for a v2 factory scene bank, naming its index in FactoryScenes. Those banks are
+        whole 128-slot scene sets rather than single patches, so they cannot be expressed as
+        a FactoryPresetDef and are built from FactoryScenes instead. */
+    int sceneBankIndex = -1;
 };
 
 /**

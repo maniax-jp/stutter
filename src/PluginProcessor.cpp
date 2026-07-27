@@ -499,6 +499,10 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     if (sceneDocument != nullptr)
         state.appendChild (sceneDocument->getState().createCopy(), nullptr);
 
+    // Which scene was live, so reopening a project returns to it rather than to whichever
+    // scene happens to come first in the bank.
+    state.setProperty (stutter::SceneIDs::activeScene, gestureEngine.getActiveScene(), nullptr);
+
 
     juce::ValueTree curvesTree (ID::curvesNode);
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
@@ -545,6 +549,26 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
             sceneDocument->replaceState (scenesNode);
         else
             sceneStore.rebuildFromTree (scenesNode);
+
+        // Land on a scene that actually exists. The factory banks map their scenes to MIDI
+        // notes from C4 up, so a freshly loaded bank would otherwise sit on empty scene 0 and
+        // make no sound at all until the user happened to play the right note -- the plugin
+        // looking broken on first contact. An explicitly saved activeScene wins, so reopening
+        // a project still returns to whatever the user was on.
+        const int savedActive = (int) newState.getProperty (stutter::SceneIDs::activeScene, -1);
+        int target = savedActive;
+
+        if (target < 0 || sceneStore.get (target) == nullptr || ! sceneStore.get (target)->populated)
+        {
+            target = -1;
+            for (int i = 0; i < stutter::maxScenes && target < 0; ++i)
+                if (const auto* s = sceneStore.get (i))
+                    if (s->populated && s->hasAnyBlocks())
+                        target = i;
+        }
+
+        if (target >= 0)
+            gestureEngine.setActiveScene (target);
     }
 
     // The v1 Curves node is still read: the three global curve modulators
