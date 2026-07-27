@@ -10,6 +10,7 @@ add_executable(render_test
     ${CMAKE_SOURCE_DIR}/src/PluginEditor.cpp
     ${CMAKE_SOURCE_DIR}/src/PresetManager.cpp
     ${CMAKE_SOURCE_DIR}/src/FactoryPresets.cpp
+    ${CMAKE_SOURCE_DIR}/src/FactoryScenes.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/StutterLookAndFeel.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/HeaderBar.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/StepGrid.cpp

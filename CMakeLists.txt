@@ -44,6 +44,7 @@ target_sources(Stutter
         src/PluginEditor.cpp
         src/PresetManager.cpp
         src/FactoryPresets.cpp
+    src/FactoryScenes.cpp
         src/ui/StutterLookAndFeel.cpp
         src/ui/HeaderBar.cpp
         src/ui/StepGrid.cpp

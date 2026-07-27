@@ -43,6 +43,7 @@
 #include "state/SceneSnapshot.h"
 #include "state/SceneStore.h"
 #include "state/SceneDocument.h"
+#include "FactoryScenes.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -2130,6 +2131,152 @@ bool testNewEffects()
     return ok;
 }
 
+// (m) Factory scene banks parse, bake, and produce audio.
+//
+// Presets are data, and data that nothing loads is data nobody notices is broken. Each bank
+// is built, published, and rendered here, so a schema change that invalidates a preset fails
+// the build rather than surfacing as a silent scene in someone's session.
+bool testFactoryScenes()
+{
+    printf ("\n[Test M] factory scene banks\n");
+
+    using namespace stutter;
+    bool ok = true;
+
+    const int numBanks = FactoryScenes::getNumBanks();
+    if (numBanks <= 0)
+    {
+        printf ("  FAIL: no factory banks\n");
+        return false;
+    }
+
+    for (int b = 0; b < numBanks; ++b)
+    {
+        const auto name = FactoryScenes::getBankName (b);
+        const auto tree = FactoryScenes::createBank (b);
+
+        if (! tree.isValid() || tree.getNumChildren() == 0)
+        {
+            printf ("  FAIL: bank %d (%s) is empty\n", b, name.toRawUTF8());
+            ok = false;
+            continue;
+        }
+
+        SceneStore store;
+        store.rebuildFromTree (tree);
+
+        int populated = 0, withBlocks = 0, withCurves = 0;
+        for (int i = 0; i < maxScenes; ++i)
+        {
+            const auto* s = store.get (i);
+            if (s == nullptr || ! s->populated)
+                continue;
+            ++populated;
+
+            int blocks = 0;
+            for (int l = 0; l < maxLanes; ++l)
+                blocks += s->lanes[(size_t) l].numBlocks;
+            if (blocks > 0)
+                ++withBlocks;
+            if (s->numActiveCurves > 0)
+                ++withCurves;
+
+            // Geometry must be in range, or the sequencer would be handed a pattern it
+            // cannot iterate.
+            if (s->beats < 1 || s->beats > 8 || s->divisions < 2 || s->divisions > 8)
+            {
+                printf ("  FAIL: bank %d scene %d has out-of-range geometry (%d x %d)\n",
+                        b, i, s->beats, s->divisions);
+                ok = false;
+            }
+        }
+
+        printf ("  bank %d %-20s scenes=%d withBlocks=%d withCurves=%d\n",
+                b, name.toRawUTF8(), populated, withBlocks, withCurves);
+
+        if (populated == 0) { printf ("    FAIL: no scenes survived baking\n"); ok = false; }
+        if (withBlocks == 0) { printf ("    FAIL: no scene has any blocks\n"); ok = false; }
+
+        // Render the first populated scene: a bank that bakes but makes no sound is not a
+        // usable preset.
+        for (int i = 0; i < maxScenes; ++i)
+        {
+            const auto* s = store.get (i);
+            if (s == nullptr || ! s->populated)
+                continue;
+
+            int blocks = 0;
+            for (int l = 0; l < maxLanes; ++l)
+                blocks += s->lanes[(size_t) l].numBlocks;
+            if (blocks == 0)
+                continue;
+
+            CaptureBuffer cap; cap.prepare (kSampleRate, 2, 2.5);
+            BlockSequencer seq;
+            seq.setLaneEffect (StutterAudioProcessor::laneStutter, std::make_unique<StutterEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneTapeStop, std::make_unique<TapeStopEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneTapeStart, std::make_unique<TapeStartEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneReverse, std::make_unique<ReverseEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneGate, std::make_unique<GateEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneFilter, std::make_unique<FilterEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneCrush, std::make_unique<CrushEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneStretcher, std::make_unique<StretcherEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneShuffler, std::make_unique<ShufflerEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneDelay, std::make_unique<DelayEffect>());
+            seq.setLaneEffect (StutterAudioProcessor::laneDistort, std::make_unique<DistortionEffect>());
+            seq.prepare (kSampleRate, 2);
+            seq.setEnabled (true);
+            seq.updateChainOrder (*s);
+
+            ModulationEngine mod;
+            mod.prepare (kSampleRate);
+
+            const int total = (int) (kSampleRate * 2.0);
+            juce::AudioBuffer<float> source (2, total);
+            fillTestSignal (source, kSampleRate, kBpm);
+
+            const double pps = (kBpm / 60.0) / kSampleRate;
+            double clock = 0.0;
+            juce::AudioBuffer<float> out (2, total);
+            out.clear();
+            for (int pos = 0; pos < total; pos += kBlockSize)
+            {
+                const int n = juce::jmin (kBlockSize, total - pos);
+                juce::AudioBuffer<float> blk (2, n);
+                for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
+                cap.write (blk);
+                seq.processBlock (blk, cap, *s, clock, pps, &mod);
+                clock += pps * (double) n;
+                for (int c = 0; c < 2; ++c) out.copyFrom (c, pos, blk, c, 0, n);
+            }
+
+            const auto m = analyze (out, kClickThreshold, kDiscontinuityThreshold);
+            printf ("    scene %d renders: rms=%.4f clicks=%d\n", i, m.rms, m.severeClickCount);
+
+            if (m.severeClickCount != 0)
+            {
+                printf ("    FAIL: bank %d scene %d clicks\n", b, i);
+                ok = false;
+            }
+            // Nothing finite means NaN escaped somewhere, which would be silent in an RMS
+            // check but lethal in a host.
+            bool finite = true;
+            for (int c = 0; c < 2 && finite; ++c)
+                for (int k = 0; k < total; ++k)
+                    if (! std::isfinite (out.getReadPointer (c)[k])) { finite = false; break; }
+            if (! finite)
+            {
+                printf ("    FAIL: bank %d scene %d produced non-finite output\n", b, i);
+                ok = false;
+            }
+            break;
+        }
+    }
+
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -2271,8 +2418,9 @@ int main (int argc, char* argv[])
     const bool testJPass = testModulationEngine();
     const bool testKPass = testSceneDocument();
     const bool testLPass = testNewEffects();
+    const bool testMPass = testFactoryScenes();
     if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
-        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass || ! testLPass)
+        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass || ! testLPass || ! testMPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");
