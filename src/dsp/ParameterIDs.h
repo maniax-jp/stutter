@@ -117,6 +117,6 @@ constexpr int stretcher   = 8;
 constexpr int shuffler    = 9;
 constexpr int delay       = 10;
 constexpr int distort     = 11;
-constexpr int count       = 8;   // v1 lane count, still what StepSequencer iterates
+constexpr int count       = 8;   // lanes carried over from v1, still used by the v1 preset format
 constexpr int countV2     = 12;
 } // namespace stutter::lanes

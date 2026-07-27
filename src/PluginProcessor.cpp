@@ -534,10 +534,14 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
         sceneStore.rebuildFromTree (scenesNode);
     }
 
-    // Fall back to existing v1 loading path (this build still uses StepSequencer and
-    // the v1 Sequencer/Curves nodes; WP3 replaces that).
+    // The v1 Curves node is still read: the three global curve modulators
+    // (Volume/Filter/Pan) predate the routable matrix and remain the way those three
+    // targets are shaped, so presets carrying them must still load. The v1 Sequencer node
+    // is looked up only to be stripped below -- nothing consumes it since the block
+    // sequencer took over.
     auto sequencerTree = newState.getChildWithName (ID::sequencerNode);
     auto curvesTree = newState.getChildWithName (ID::curvesNode);
+    juce::ignoreUnused (sequencerTree);
 
     // Strip structural nodes before handing off to APVTS (it only expects parameter children)
     auto paramsOnlyState = newState.createCopy();
