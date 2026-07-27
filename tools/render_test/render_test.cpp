@@ -152,12 +152,6 @@ void fillTestSignal (juce::AudioBuffer<float>& buf, double sampleRate, double bp
     }
 }
 
-void setAllStepsOn (stutter::StepSequencer& seq, int lane)
-{
-    for (int s = 0; s < stutter::numSteps; ++s)
-        seq.setStep (lane, s, true);
-}
-
 // internalBpm is APVTS-owned (see docs/ISSUES.md 2.2); processBlock reads it via
 // getRawParameterValue(), so tests must set it the same way a host/preset would.
 void setInternalBpm (StutterAudioProcessor& processor, double bpm)
@@ -458,8 +452,12 @@ bool testSequencerOffBypassesStepsButCurvesStillWork()
         processor.getCurve (stutter::ModTarget::Filter).resetToDefault();
         processor.getCurve (stutter::ModTarget::Pan).resetToDefault();
 
-        auto& seq = processor.getSequencer();
-        setAllStepsOn (seq, StutterAudioProcessor::laneStutter); // would be very audible if not bypassed
+        // A fully-active lane, which would be very audible if the bypass did not work.
+        auto& doc = processor.getSceneDocument();
+        const int sceneIdx = processor.getGestureEngine().getActiveScene();
+        for (int d = 0; d < stutter::numSteps; ++d)
+            doc.addBlock (sceneIdx, StutterAudioProcessor::laneStutter, d, 1);
+        doc.publish();
 
         const int totalSamples = (int) std::round (1.5 * kSampleRate);
         juce::AudioBuffer<float> source (2, totalSamples);
@@ -520,9 +518,8 @@ bool testSequencerOffBypassesStepsButCurvesStillWork()
         volumeCurve.applyPreset ("SidechainDuck");
         volumeCurve.setSyncDivision (2); // 1/4 bar per cycle, several cycles within the render
 
-        auto& seq = processor.getSequencer();
-        // Sequencer left fully OFF pattern-wise too (irrelevant since sequencerOn gates it anyway).
-        juce::ignoreUnused (seq);
+        // No blocks are added: sequencerOn gates the lanes anyway, so the pattern is
+        // irrelevant to what this check measures.
 
         const int totalSamples = (int) std::round (2.0 * kSampleRate);
         juce::AudioBuffer<float> source (2, totalSamples);
@@ -1020,142 +1017,23 @@ bool testSceneSchemaAndStore()
     return ok;
 }
 
-// (h) BlockSequencer must reproduce StepSequencer exactly on the v1 grid.
+// (h) The block model's own behaviour: held envelopes and swing.
 //
-// This is WP3's acceptance criterion. With beats=4, divisions=4, swing=0 and one 1-division
-// block per ON step, the block model describes precisely the pattern the fixed 16-cell grid
-// described, so the audio must be bit-identical. A difference here means replacing the
-// sequencer changed the DSP -- which is a bug for this package, not progress. It is also the
-// only check that covers the block model against a known-good reference before variable
-// lengths and swing (which have no reference) are trusted.
-bool testBlockSequencerMatchesStepSequencer()
+// This began as a v1-equivalence test that rendered every lane through both StepSequencer and
+// BlockSequencer and required bit-identical output. That comparison earned its keep -- it
+// caught adjacent blocks re-latching ContinueThroughRun envelopes, and swing changing the
+// tempo instead of the groove -- and it proved the block model reproduced the old grid before
+// the audio path was switched to it.
+//
+// It is retired along with StepSequencer itself. The equivalence it established is now held
+// by the golden baseline, where seven of the eight lanes still carry their exact v1
+// checksums. What remains below are the checks that never had a v1 counterpart.
+bool testBlockSequencerBehaviour()
 {
-    printf ("\n[Test H] BlockSequencer reproduces StepSequencer on the v1 grid\n");
+    printf ("\n[Test H] block model: held envelopes and swing\n");
 
     using namespace stutter;
-
-    auto makeEffect = [] (int lane) -> std::unique_ptr<LaneEffect>
-    {
-        switch (lane)
-        {
-            case 0:  return std::make_unique<StutterEffect>();
-            case 1:  return std::make_unique<TapeStopEffect>();
-            case 2:  return std::make_unique<TapeStartEffect>();
-            case 3:  return std::make_unique<ReverseEffect>();
-            case 4:  return std::make_unique<RepitchEffect>();
-            case 5:  return std::make_unique<GateEffect>();
-            case 6:  return std::make_unique<FilterEffect>();
-            default: return std::make_unique<CrushEffect>();
-        }
-    };
-
-    // An APVTS instance purely so StepSequencer can fill LaneParams the way it does in the
-    // shipping build; the values are mirrored into the snapshot so both paths see the same
-    // numbers and any difference is attributable to the sequencer, not the parameters.
-    StutterAudioProcessor proc;
-    proc.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
-    proc.prepareToPlay (kSampleRate, kBlockSize);
-    auto& apvts = proc.getAPVTS();
-
-    const int preRollSamples = (int) kSampleRate; // 1s of history, as in the lane sweep above
-    const int renderSamples = (int) std::round (kNumBars * numSteps * ((60.0 / kBpm) / 4.0) * kSampleRate)
-                              + kBlockSize;
-    const int totalSamples = preRollSamples + renderSamples;
-
-    juce::AudioBuffer<float> source (2, totalSamples);
-    fillTestSignal (source, kSampleRate, kBpm);
-
-    const double ppqPerSample = (kBpm / 60.0) / kSampleRate;
     bool ok = true;
-
-    for (const auto& laneSpec : kLanes)
-    {
-        const int lane = laneSpec.laneIndex;
-
-        juce::AudioBuffer<float> outV1 (2, totalSamples); outV1.clear();
-        {
-            CaptureBuffer cap; cap.prepare (kSampleRate, 2, 2.5);
-            StepSequencer seq;
-            seq.setApvts (&apvts);
-            seq.setLaneEffect (lane, makeEffect (lane));
-            seq.prepare (kSampleRate, 2);
-            seq.setEnabled (true);
-
-            double clock = 0.0;
-            for (int pos = 0; pos < totalSamples; pos += kBlockSize)
-            {
-                const int n = juce::jmin (kBlockSize, totalSamples - pos);
-                juce::AudioBuffer<float> blk (2, n);
-                for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
-                if (pos >= preRollSamples) setAllStepsOn (seq, lane);
-                cap.write (blk);
-                seq.processBlock (blk, cap, clock, ppqPerSample);
-                clock += ppqPerSample * (double) n;
-                for (int c = 0; c < 2; ++c) outV1.copyFrom (c, pos, blk, c, 0, n);
-            }
-        }
-
-        juce::AudioBuffer<float> outV2 (2, totalSamples); outV2.clear();
-        {
-            CaptureBuffer cap; cap.prepare (kSampleRate, 2, 2.5);
-            BlockSequencer seq;
-            seq.setLaneEffect (lane, makeEffect (lane));
-            seq.prepare (kSampleRate, 2);
-            seq.setEnabled (true);
-
-            SceneSnapshot idle {};
-            idle.beats = 4; idle.divisions = 4; idle.swing = 0.0f;
-
-            SceneSnapshot on = idle;
-            for (int d = 0; d < numSteps; ++d)
-            {
-                on.lanes[(size_t) lane].blocks[(size_t) d].startDiv = (juce::int16) d;
-                on.lanes[(size_t) lane].blocks[(size_t) d].lengthDiv = 1;
-            }
-            on.lanes[(size_t) lane].numBlocks = numSteps;
-
-            if (auto* eff = seq.getLaneEffect (lane))
-            {
-                const auto set = eff->getParamDescriptors();
-                for (int i = 0; i < set.count && i < maxParamsPerLane; ++i)
-                {
-                    float v = set[i].defaultValue;
-                    if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (lane) + set[i].id))
-                        v = p->load();
-                    idle.lanes[(size_t) lane].params[(size_t) i] = v;
-                    on.lanes[(size_t) lane].params[(size_t) i] = v;
-                }
-            }
-            seq.updateChainOrder (on);
-
-            double clock = 0.0;
-            for (int pos = 0; pos < totalSamples; pos += kBlockSize)
-            {
-                const int n = juce::jmin (kBlockSize, totalSamples - pos);
-                juce::AudioBuffer<float> blk (2, n);
-                for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
-                cap.write (blk);
-                seq.processBlock (blk, cap, pos >= preRollSamples ? on : idle, clock, ppqPerSample);
-                clock += ppqPerSample * (double) n;
-                for (int c = 0; c < 2; ++c) outV2.copyFrom (c, pos, blk, c, 0, n);
-            }
-        }
-
-        double maxDiff = 0.0;
-        const int from = juce::jmin (preRollSamples + kBlockSize, totalSamples);
-        for (int c = 0; c < 2; ++c)
-        {
-            const float* a = outV1.getReadPointer (c);
-            const float* b = outV2.getReadPointer (c);
-            for (int i = from; i < totalSamples; ++i)
-                maxDiff = juce::jmax (maxDiff, std::abs ((double) a[i] - (double) b[i]));
-        }
-
-        printf ("  %-10s maxDiff = %.9g%s\n", laneSpec.name, maxDiff,
-                maxDiff == 0.0 ? "  (bit-identical)" : "");
-        if (maxDiff != 0.0)
-            ok = false;
-    }
 
     // --- The v2-only features, which by definition have no v1 reference to compare to ---
     //
@@ -2504,7 +2382,7 @@ int main (int argc, char* argv[])
     const bool testEPass = testApvtsInternalBpmChangesFreeRunSpeed();
     const bool testFPass = testRateLabelsMatchActualDurations();
     const bool testGPass = testSceneSchemaAndStore();
-    const bool testHPass = testBlockSequencerMatchesStepSequencer();
+    const bool testHPass = testBlockSequencerBehaviour();
     const bool testIPass = testGestureEngine();
     const bool testJPass = testModulationEngine();
     const bool testKPass = testSceneDocument();

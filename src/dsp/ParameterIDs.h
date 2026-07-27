@@ -92,6 +92,15 @@ inline float neutralValueForCurve (const juce::String& curveName) noexcept
 
 } // namespace stutter::ID
 
+namespace stutter
+{
+// v1 pattern geometry. StepSequencer is gone, but the v1 preset format (and the tests that
+// exercise curve reset through it) still describes an 8x16 grid, so the dimensions outlive
+// the class that used to own them.
+static constexpr int numLanes = 8;
+static constexpr int numSteps = 16;
+}
+
 namespace stutter::lanes
 {
 constexpr int stutterLane = 0;

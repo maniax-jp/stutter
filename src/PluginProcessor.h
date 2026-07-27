@@ -4,7 +4,6 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "dsp/CaptureBuffer.h"
-#include "dsp/StepSequencer.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/GestureEngine.h"
 #include "dsp/ParameterIDs.h"
@@ -58,7 +57,6 @@ public:
 
     // ---- Public access for the (phase-2) editor ----
     juce::AudioProcessorValueTreeState& getAPVTS() noexcept { return apvts; }
-    stutter::StepSequencer& getSequencer() noexcept { return sequencer; }
     stutter::CurveModulator& getCurve (stutter::ModTarget target) noexcept
     {
         return curves[(size_t) target];
@@ -107,7 +105,6 @@ private:
     juce::AudioProcessorValueTreeState apvts;
 
     stutter::CaptureBuffer captureBuffer;
-    stutter::StepSequencer sequencer;
 
     // Order matches ModTarget: Volume, Filter, Pan. Each starts enabled + flat at its own
     // neutral value (see stutter::ID::neutralValueForCurve, the single source of truth: 0.5 =
@@ -157,9 +154,7 @@ private:
     // processChunk so a note can change the active scene before that chunk is rendered.
     stutter::GestureEngine gestureEngine;
 
-    // The v2 sequencer. Not yet driving the audio path -- StepSequencer still does that --
-    // but it owns the playhead the block grid renders, so the UI can be built and verified
-    // against real transport before the switchover.
+    // The sequencer. Drives the audio path and owns the playhead the block grid renders.
     stutter::BlockSequencer blockSequencer;
     stutter::ModulationEngine modulationEngine;
 

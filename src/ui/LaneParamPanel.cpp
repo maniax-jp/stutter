@@ -1,5 +1,5 @@
 #include "LaneParamPanel.h"
-#include "StepGrid.h"
+#include "BlockGrid.h"
 #include "../PluginProcessor.h"
 #include "../dsp/ParameterIDs.h"
 
@@ -91,7 +91,7 @@ void LaneParamPanel::rebuildForLane (int laneIndex)
     currentLane = laneIndex;
     controls.clear();
 
-    laneTitle.setText (juce::String (StepGrid::getLaneName (laneIndex)), juce::dontSendNotification);
+    laneTitle.setText (juce::String (BlockGrid::getLaneName (laneIndex)), juce::dontSendNotification);
     const auto accent = Palette::laneColours[(size_t) juce::jlimit (0, 7, laneIndex)];
     laneTitle.setColour (juce::Label::textColourId, accent);
 

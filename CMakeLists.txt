@@ -47,8 +47,7 @@ target_sources(Stutter
     src/FactoryScenes.cpp
         src/ui/StutterLookAndFeel.cpp
         src/ui/HeaderBar.cpp
-        src/ui/StepGrid.cpp
-    src/ui/BlockGrid.cpp
+        src/ui/BlockGrid.cpp
     src/ui/SceneBrowser.cpp
     src/ui/ModRoutePanel.cpp
         src/ui/LaneParamPanel.cpp

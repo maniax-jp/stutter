@@ -28,16 +28,6 @@ StutterAudioProcessor::StutterAudioProcessor()
                            .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    sequencer.setApvts (&apvts);
-    sequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect>());
-    sequencer.setLaneEffect (laneTapeStop,  std::make_unique<TapeStopEffect>());
-    sequencer.setLaneEffect (laneTapeStart, std::make_unique<TapeStartEffect>());
-    sequencer.setLaneEffect (laneReverse,   std::make_unique<ReverseEffect>());
-    sequencer.setLaneEffect (laneRepitch,   std::make_unique<RepitchEffect>());
-    sequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect>());
-    sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect>());
-    sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
-
     // The block sequencer owns the audio path. It carries all twelve lanes; StepSequencer
     // above is the v1 grid and has no representation for the four v2 additions.
     blockSequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect>());
@@ -98,7 +88,6 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     const int numCh = juce::jmax (getTotalNumInputChannels(), getTotalNumOutputChannels());
 
     captureBuffer.prepare (sampleRate, numCh, 2.5);
-    sequencer.prepare (sampleRate, numCh);
     gestureEngine.prepare (sampleRate);
     blockSequencer.prepare (sampleRate, numCh);
     modulationEngine.prepare (sampleRate);
@@ -159,9 +148,7 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 {
     const bool hostSyncEnabled = apvts.getRawParameterValue (ID::hostSync)->load() > 0.5f;
 
-    const bool seqOn = apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f;
-    sequencer.setEnabled (seqOn);
-    blockSequencer.setEnabled (seqOn);
+    blockSequencer.setEnabled (apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f);
 
     double bpm = apvts.getRawParameterValue (ID::internalBpm)->load();
     double ppqAtBlockStart = internalClockPpq;
@@ -503,10 +490,8 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty (stutter::SceneIDs::version, stutter::stateSchemaVersion, nullptr);
 
     // Attach structural (non-parameter) data: step grid + curves
-    state.removeChild (state.getChildWithName (ID::sequencerNode), nullptr);
     state.removeChild (state.getChildWithName (ID::curvesNode), nullptr);
 
-    state.appendChild (sequencer.toValueTree(), nullptr);
 
     juce::ValueTree curvesTree (ID::curvesNode);
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
@@ -567,7 +552,6 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
     // preset that omits this structural data (old/hand-edited user presets, presets that don't
     // touch a given curve, etc.) always yields a full reset rather than leaving residue from
     // whatever was previously loaded.
-    sequencer.fromValueTree (sequencerTree);
 
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
     for (size_t i = 0; i < curves.size(); ++i)
@@ -668,7 +652,6 @@ void StutterAudioProcessor::loadInitState()
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
             ranged->setValueNotifyingHost (ranged->getDefaultValue());
 
-    sequencer.fromValueTree (juce::ValueTree {});
     // An invalid tree makes each curve fall back to its own neutral value (see
     // ID::neutralValueForCurve) -- the same path Test C exercises for malformed state.
     for (size_t i = 0; i < curves.size(); ++i)

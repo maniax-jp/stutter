@@ -1,5 +1,5 @@
 #include "BottomTabs.h"
-#include "StepGrid.h"
+#include "BlockGrid.h"
 #include "../PluginProcessor.h"
 
 namespace stutter::ui
@@ -38,7 +38,7 @@ BottomTabs::BottomTabs (StutterAudioProcessor& processor)
 
 void BottomTabs::updateLaneTabLabel()
 {
-    laneTabButton.setButtonText (juce::String ("LANE: ") + StepGrid::getLaneName (selectedLane));
+    laneTabButton.setButtonText (juce::String ("LANE: ") + BlockGrid::getLaneName (selectedLane));
 }
 
 void BottomTabs::setSelectedLane (int laneIndex)

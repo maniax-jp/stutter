@@ -13,7 +13,6 @@ add_executable(render_test
     ${CMAKE_SOURCE_DIR}/src/FactoryScenes.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/StutterLookAndFeel.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/HeaderBar.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/StepGrid.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/BlockGrid.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/SceneBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/ModRoutePanel.cpp
