@@ -2,9 +2,17 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <array>
 
 namespace stutter
 {
+
+/** Registered per-lane defaults; see SceneSchema::setLaneDefaults. Written once at startup
+    from the message thread and read during baking (also message thread), so no
+    synchronisation is needed -- the audio thread never touches this, it only ever sees the
+    baked snapshot. */
+static std::array<std::array<float, maxParamsPerLane>, maxLanes> g_laneDefaults {};
+static std::array<bool, maxLanes> g_laneDefaultsSet {};
 
 static float smoothstepFn (float t) noexcept
 {
@@ -289,6 +297,25 @@ std::vector<CurvePointV2> SceneSchema::pointsForTier (uint8_t tier, float locked
 /*  sceneFromTree                                                              */
 /* -------------------------------------------------------------------------- */
 
+void SceneSchema::setLaneDefaults (int lane, const float* values, int count)
+{
+    if (lane < 0 || lane >= maxLanes || values == nullptr)
+        return;
+
+    auto& dst = g_laneDefaults[static_cast<size_t> (lane)];
+    dst.fill (0.0f);
+    for (int i = 0; i < count && i < maxParamsPerLane; ++i)
+        dst[static_cast<size_t> (i)] = values[i];
+
+    g_laneDefaultsSet[static_cast<size_t> (lane)] = true;
+}
+
+void SceneSchema::clearLaneDefaults()
+{
+    for (auto& d : g_laneDefaults) d.fill (0.0f);
+    g_laneDefaultsSet.fill (false);
+}
+
 SceneSnapshot SceneSchema::sceneFromTree (const juce::ValueTree& sceneTree)
 {
     SceneSnapshot scene {};
@@ -400,6 +427,12 @@ SceneSnapshot SceneSchema::sceneFromTree (const juce::ValueTree& sceneTree)
 
     // ---- Lanes ----
     {
+        // Seed every lane with its declared defaults BEFORE applying the tree, so a scene
+        // that omits a lane still gets a usable parameter set rather than all zeros.
+        for (int l = 0; l < maxLanes; ++l)
+            if (g_laneDefaultsSet[static_cast<size_t> (l)])
+                scene.lanes[static_cast<size_t> (l)].params = g_laneDefaults[static_cast<size_t> (l)];
+
         const auto lpNode = sceneTree.getChildWithName (SceneIDs::laneParams);
         if (lpNode.isValid())
         {

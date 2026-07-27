@@ -15,6 +15,8 @@
 #include "dsp/effects/DistortionEffect.h"
 
 #include "dsp/ParameterLayout.h"
+#include "state/SceneSchema.h"
+#include <array>
 
 using namespace stutter;
 
@@ -35,6 +37,38 @@ StutterAudioProcessor::StutterAudioProcessor()
     sequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect>());
     sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect>());
     sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
+
+    // The block sequencer owns the audio path. It carries all twelve lanes; StepSequencer
+    // above is the v1 grid and has no representation for the four v2 additions.
+    blockSequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect>());
+    blockSequencer.setLaneEffect (laneTapeStop,  std::make_unique<TapeStopEffect>());
+    blockSequencer.setLaneEffect (laneTapeStart, std::make_unique<TapeStartEffect>());
+    blockSequencer.setLaneEffect (laneReverse,   std::make_unique<ReverseEffect>());
+    blockSequencer.setLaneEffect (laneRepitch,   std::make_unique<RepitchEffect>());
+    blockSequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect>());
+    blockSequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect>());
+    blockSequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
+    blockSequencer.setLaneEffect (laneStretcher, std::make_unique<StretcherEffect>());
+    blockSequencer.setLaneEffect (laneShuffler,  std::make_unique<ShufflerEffect>());
+    blockSequencer.setLaneEffect (laneDelay,     std::make_unique<DelayEffect>());
+    blockSequencer.setLaneEffect (laneDistort,   std::make_unique<DistortionEffect>());
+
+    // Register each lane's declared defaults with the schema BEFORE the document is built,
+    // so the first bake already has them. A scene that omits a lane would otherwise get
+    // all-zero parameters -- a Filter at cutoff 0 and a Gate at duty 0 are both silent, so
+    // an unconfigured lane would produce nothing rather than its neutral sound.
+    for (int lane = 0; lane < stutter::maxLanes; ++lane)
+    {
+        if (auto* effect = blockSequencer.getLaneEffect (lane))
+        {
+            const auto set = effect->getParamDescriptors();
+            std::array<float, stutter::maxParamsPerLane> defs {};
+            for (int i = 0; i < set.count && i < stutter::maxParamsPerLane; ++i)
+                defs[(size_t) i] = set[i].defaultValue;
+            stutter::SceneSchema::setLaneDefaults (lane, defs.data(),
+                                                  juce::jmin (set.count, stutter::maxParamsPerLane));
+        }
+    }
 
     sceneDocument = std::make_unique<stutter::SceneDocument> (sceneStore, undoManager);
     presetManager = std::make_unique<stutter::PresetManager> (*this);
@@ -67,6 +101,8 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     sequencer.prepare (sampleRate, numCh);
     gestureEngine.prepare (sampleRate);
     blockSequencer.prepare (sampleRate, numCh);
+    modulationEngine.prepare (sampleRate);
+    lastChainOrderScene = -1;
     gestureEngine.setIdentityMapping();
 
     dryWetSmoothed.reset (sampleRate, 0.02);
@@ -123,7 +159,9 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
 {
     const bool hostSyncEnabled = apvts.getRawParameterValue (ID::hostSync)->load() > 0.5f;
 
-    sequencer.setEnabled (apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f);
+    const bool seqOn = apvts.getRawParameterValue (ID::sequencerOn)->load() > 0.5f;
+    sequencer.setEnabled (seqOn);
+    blockSequencer.setEnabled (seqOn);
 
     double bpm = apvts.getRawParameterValue (ID::internalBpm)->load();
     double ppqAtBlockStart = internalClockPpq;
@@ -158,7 +196,27 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
     if (! usingHostSync)
         ppqAtBlockStart = internalClockPpq;
 
-    sequencer.processBlock (buffer, captureBuffer, ppqAtBlockStart, ppqPerSample);
+    // v2: the block sequencer drives the audio. It reads the scene the gesture layer has
+    // selected, so a MIDI note changes what is playing rather than merely what is displayed.
+    //
+    // A null scene (nothing published, or an index with no data) leaves the buffer untouched
+    // rather than silencing it -- an unmapped note should be inert, not a dropout.
+    if (const auto* scene = sceneStore.get (gestureEngine.getActiveScene()))
+    {
+        if (scene->populated)
+        {
+            // Chain order can change with the scene, and sorting per sample would be waste;
+            // doing it here costs one pass per block.
+            if (lastChainOrderScene != gestureEngine.getActiveScene())
+            {
+                blockSequencer.updateChainOrder (*scene);
+                lastChainOrderScene = gestureEngine.getActiveScene();
+            }
+
+            blockSequencer.processBlock (buffer, captureBuffer, *scene,
+                                         ppqAtBlockStart, ppqPerSample, &modulationEngine);
+        }
+    }
 
     // Advance internal free-running clock for next block regardless (so it stays live when host stops)
     internalClockPpq = ppqAtBlockStart + ppqPerSample * (double) buffer.getNumSamples();

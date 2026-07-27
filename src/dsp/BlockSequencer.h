@@ -184,6 +184,7 @@ public:
                 ? modulation->nextSample (scene, patternPhase)
                 : nullptr;
 
+
             // --- Which lanes are active on this sample, and under which block ---
             int activeBufferLane = -1;
             std::array<const Block*, maxLanes> activeBlock {};

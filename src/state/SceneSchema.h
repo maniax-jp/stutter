@@ -144,6 +144,22 @@ struct CurvePointV2
 */
 namespace SceneSchema
 {
+    /**
+        Per-lane parameter defaults, seeded before a scene's <Lane> nodes are applied.
+
+        Without this a scene that omits a lane gets all-zero parameters rather than the
+        declared defaults -- a Filter with cutoff 0 and a Gate with duty 0 are both silent,
+        so an unconfigured lane would produce nothing instead of its neutral sound. Scenes
+        legitimately omit lanes they do not use, so this is the common case, not an edge one.
+
+        SceneSchema cannot reach the effects (they live in dsp/, which depends on state/, not
+        the reverse), so the processor registers the descriptor defaults here at startup.
+    */
+    void setLaneDefaults (int lane, const float* values, int count);
+
+    /** Clear all registered defaults. Tests use this to isolate. */
+    void clearLaneDefaults();
+
     /** Build a baked snapshot from one <Scene> node. Missing or malformed properties fall
         back to the SceneSnapshot defaults, so a truncated tree yields a usable scene rather
         than garbage. */

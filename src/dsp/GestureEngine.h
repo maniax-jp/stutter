@@ -47,8 +47,13 @@ public:
 
     void reset()
     {
-        gateGain = 0.0f;
-        gateTarget = 0.0f;
+        // Open by default. Auto mode -- the default and the only mode v1 had -- is meant to
+        // be always-on, so starting closed would silence the plugin until the first
+        // processMidi call ramped it up, and would silence it permanently on any path that
+        // does not call processMidi at all. MIDI mode closes it explicitly on the first
+        // block, which is early enough that no note is ever missed.
+        gateGain = 1.0f;
+        gateTarget = 1.0f;
         pendingCount = 0;
         heldNotes.fill (false);
         heldCount = 0;

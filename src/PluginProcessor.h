@@ -13,6 +13,7 @@
 #include "state/LiveParamOverlay.h"
 #include "state/SceneDocument.h"
 #include "dsp/BlockSequencer.h"
+#include "dsp/ModulationEngine.h"
 #include "state/SceneSchema.h"
 
 namespace stutter
@@ -150,6 +151,10 @@ private:
     // but it owns the playhead the block grid renders, so the UI can be built and verified
     // against real transport before the switchover.
     stutter::BlockSequencer blockSequencer;
+    stutter::ModulationEngine modulationEngine;
+
+    /** Which scene the chain order was last sorted for; -1 forces a re-sort. */
+    int lastChainOrderScene = -1;
 
     juce::UndoManager undoManager;
     std::unique_ptr<stutter::SceneDocument> sceneDocument;

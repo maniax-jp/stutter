@@ -588,9 +588,9 @@ bool testApvtsInternalBpmChangesFreeRunSpeed()
         apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f); // force free-run
         setInternalBpm (processor, bpm);
 
-        auto& seq = processor.getSequencer();
-        setAllStepsOn (seq, StutterAudioProcessor::laneGate); // any lane; only playhead advance matters
-
+        // Reads the BLOCK sequencer's playhead: since the audio path switched to it, the v1
+        // StepSequencer no longer advances and querying it would report a frozen transport
+        // regardless of tempo. The scene needs no blocks -- only that the playhead moves.
         const int totalSamples = (int) std::round (2.0 * kSampleRate);
         juce::AudioBuffer<float> block (2, kBlockSize);
         juce::MidiBuffer midi;
@@ -607,7 +607,7 @@ bool testApvtsInternalBpmChangesFreeRunSpeed()
             midi.clear();
             processor.processBlock (block, midi);
 
-            const int step = seq.getCurrentPlayheadStep();
+            const int step = processor.getBlockPlayheadDivision();
             if (lastStep >= 0 && step != lastStep)
                 ++advances;
             lastStep = step;
@@ -2330,10 +2330,15 @@ int main (int argc, char* argv[])
         apvts.getParameter (stutter::ID::hostSync)->setValueNotifyingHost (0.0f);
         setInternalBpm (processor, kBpm);
 
-        auto& seq = processor.getSequencer();
-        seq.setEnabled (true);
-        // Pattern starts with all steps off during the pre-roll (see preRollSamples above) so
-        // the capture buffer fills with real history before the lane is ever triggered.
+        // The audio path is the block sequencer now, so the lane is driven by writing blocks
+        // into the scene document rather than by setting v1 steps. Sixteen 1-division blocks
+        // describe the same pattern the old "all 16 steps on" did.
+        //
+        // Blocks are added AFTER the pre-roll (see the loop below) so the capture buffer
+        // fills with real history before the lane is ever triggered -- buffer-category lanes
+        // would otherwise anchor into the silence that precedes sample 0.
+        auto& doc = processor.getSceneDocument();
+        const int renderScene = processor.getGestureEngine().getActiveScene();
 
         juce::AudioBuffer<float> renderedOutput (2, totalSamples);
         renderedOutput.clear();
@@ -2345,7 +2350,9 @@ int main (int argc, char* argv[])
         {
             if (! stepsEnabled && pos >= preRollSamples)
             {
-                setAllStepsOn (seq, laneSpec.laneIndex);
+                for (int d = 0; d < stutter::numSteps; ++d)
+                    doc.addBlock (renderScene, laneSpec.laneIndex, d, 1);
+                doc.publish();
                 stepsEnabled = true;
             }
 
