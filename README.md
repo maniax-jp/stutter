@@ -7,6 +7,10 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
 
 ![UI](docs/screenshot.png)
 
+> **v2 開発中**(ブランチ `v2-development`)。以下は v1.1.2 の機能一覧。
+> v2 で追加された Scene / 可変長ブロック / MIDI 演奏 / モジュレーションマトリクスは
+> `docs/SPEC.md` 冒頭の注記と各ヘッダの doc comment を参照。
+
 ## 機能
 
 - **8レーン × 16ステップのエフェクトシーケンサー**(ホストテンポ同期、停止時は内部クロック)
