@@ -1760,6 +1760,95 @@ bool testModulationEngine()
         juce::ignoreUnused (sink);
     }
 
+    // ---- J7: modulation actually reaches the audio -------------------------------------
+    //
+    // Everything above tests the engine in isolation. This drives BlockSequencer with and
+    // without a modulation engine attached and requires the output to differ -- otherwise
+    // the matrix could be perfectly correct and simply not plugged in, which is exactly the
+    // failure a unit test of the engine alone cannot see.
+    {
+        auto render = [&] (bool withModulation)
+        {
+            CaptureBuffer cap; cap.prepare (kSampleRate, 2, 2.5);
+            BlockSequencer seq;
+            seq.setLaneEffect (StutterAudioProcessor::laneFilter, std::make_unique<FilterEffect>());
+            seq.prepare (kSampleRate, 2);
+            seq.setEnabled (true);
+
+            SceneSnapshot scene {};
+            scene.beats = 4; scene.divisions = 4;
+            auto& lane = scene.lanes[(size_t) StutterAudioProcessor::laneFilter];
+            lane.blocks[0].startDiv = 0;
+            lane.blocks[0].lengthDiv = 16;
+            lane.numBlocks = 1;
+
+            // Filter defaults, then a curve sweeping cutoff (param 1), which the descriptor
+            // table marks continuous precisely so it can be swept.
+            if (auto* eff = seq.getLaneEffect (StutterAudioProcessor::laneFilter))
+            {
+                const auto set = eff->getParamDescriptors();
+                for (int i = 0; i < set.count && i < maxParamsPerLane; ++i)
+                    lane.params[(size_t) i] = set[i].defaultValue;
+            }
+
+            std::vector<CurvePointV2> pts {
+                { 0.0f, 0.05f, 0.0f, PointWeight::Hard },
+                { 1.0f, 1.0f,  0.0f, PointWeight::Hard }
+            };
+            SceneSchema::bakeCurveTable (pts, scene.curves[0].table.data(), CurveSnapshot::tableSize);
+            scene.curves[0].targetParam = (juce::int16) paramIndex (StutterAudioProcessor::laneFilter, 1);
+            scene.curves[0].depth = 1.0f;
+            scene.curves[0].speedMultiplier = 1.0f;
+            scene.curves[0].enabled = true;
+            scene.activeCurves[0] = 0;
+            scene.numActiveCurves = 1;
+            seq.updateChainOrder (scene);
+
+            ModulationEngine mod;
+            mod.prepare (kSampleRate);
+
+            const int total = (int) (kSampleRate * 1.0);
+            juce::AudioBuffer<float> source (2, total);
+            fillTestSignal (source, kSampleRate, kBpm);
+
+            const double pps = (kBpm / 60.0) / kSampleRate;
+            double clock = 0.0;
+            juce::AudioBuffer<float> out (2, total);
+            out.clear();
+            for (int pos = 0; pos < total; pos += kBlockSize)
+            {
+                const int n = juce::jmin (kBlockSize, total - pos);
+                juce::AudioBuffer<float> blk (2, n);
+                for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
+                cap.write (blk);
+                seq.processBlock (blk, cap, scene, clock, pps, withModulation ? &mod : nullptr);
+                clock += pps * (double) n;
+                for (int c = 0; c < 2; ++c) out.copyFrom (c, pos, blk, c, 0, n);
+            }
+            return out;
+        };
+
+        const auto plain = render (false);
+        const auto swept = render (true);
+
+        double maxDiff = 0.0;
+        for (int c = 0; c < 2; ++c)
+        {
+            const float* a = plain.getReadPointer (c);
+            const float* b = swept.getReadPointer (c);
+            for (int i = 0; i < plain.getNumSamples(); ++i)
+                maxDiff = juce::jmax (maxDiff, std::abs ((double) a[i] - (double) b[i]));
+        }
+
+        printf ("  modulated vs unmodulated filter sweep: maxDiff = %.6f\n", maxDiff);
+        check ("a routed curve audibly changes the output", maxDiff > 0.01);
+
+        // And the sweep must be smooth: a stepped cutoff would zipper.
+        const auto sweptMetrics = analyze (swept, kClickThreshold, kDiscontinuityThreshold);
+        printf ("  swept output severe clicks = %d\n", sweptMetrics.severeClickCount);
+        check ("the modulated sweep introduces no clicks", sweptMetrics.severeClickCount == 0);
+    }
+
     printf ("  %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }

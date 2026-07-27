@@ -3,6 +3,7 @@
 #include "LaneEffectV2.h"
 #include "ParamDescriptor.h"
 #include "ParamIndex.h"
+#include "ModulationEngine.h"
 #include "../state/SceneSnapshot.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <array>
@@ -100,7 +101,8 @@ public:
         SceneStore retire banks on a timer rather than refcount them on the audio thread.
     */
     void processBlock (juce::AudioBuffer<float>& buffer, const CaptureBuffer& capture,
-                       const SceneSnapshot& scene, double ppqAtBlockStart, double ppqPerSample)
+                       const SceneSnapshot& scene, double ppqAtBlockStart, double ppqPerSample,
+                       ModulationEngine* modulation = nullptr)
     {
         const int numSamples = buffer.getNumSamples();
         if (numSamples <= 0)
@@ -176,6 +178,12 @@ public:
             playheadDivision.store (divIndex, std::memory_order_relaxed);
             playheadPhase.store ((float) patternPhase, std::memory_order_relaxed);
 
+            // Advance the modulation matrix once per sample, before any lane reads it, so
+            // every lane in this sample sees the same modulated values.
+            const float* modulated = modulation != nullptr
+                ? modulation->nextSample (scene, patternPhase)
+                : nullptr;
+
             // --- Which lanes are active on this sample, and under which block ---
             int activeBufferLane = -1;
             std::array<const Block*, maxLanes> activeBlock {};
@@ -225,7 +233,7 @@ public:
                 processLane (l, effect, scene, capture, working, chCount,
                              l == activeBufferLane ? activeBlock[(size_t) l] : nullptr,
                              divIndex, divPhase, patternPhase, nowAbs,
-                             divisionLenSamples, divisionBarFraction, ppqPerSample);
+                             divisionLenSamples, divisionBarFraction, ppqPerSample, modulated);
             }
 
             // --- Texture lanes (additive, in chain order) ---
@@ -241,7 +249,8 @@ public:
 
                 processLane (l, effect, scene, capture, working, chCount,
                              activeBlock[(size_t) l], divIndex, divPhase, patternPhase,
-                             nowAbs, divisionLenSamples, divisionBarFraction, ppqPerSample);
+                             nowAbs, divisionLenSamples, divisionBarFraction, ppqPerSample,
+                             modulated);
             }
 
             for (int c = 0; c < chCount; ++c)
@@ -351,12 +360,13 @@ private:
                       const CaptureBuffer& capture, float* working, int chCount,
                       const Block* block, int divIndex, double divPhase, double patternPhase,
                       juce::int64 nowAbs, double divisionLenSamples, double divisionBarFraction,
-                      double ppqPerSample)
+                      double ppqPerSample, const float* modulated)
     {
         auto& st = laneState[(size_t) lane];
 
         updateLaneLifecycle (st, effect, lane, block, divIndex, capture, scene,
-                             divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample);
+                             divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample,
+                             modulated);
 
         if (st.gain > 0.0f)
         {
@@ -368,7 +378,9 @@ private:
             sctx.nowAbs = nowAbs;
             sctx.blockProgress = blockProgress (st, divIndex, divPhase);
             sctx.patternPhase = patternPhase;
-            sctx.modulatedParams = laneParams[(size_t) lane].params.data();
+            sctx.modulatedParams = modulated != nullptr
+                ? modulated + paramIndex (lane, 0)
+                : laneParams[(size_t) lane].params.data();
             sctx.reverseDirection = false;
             sctx.freeze = false;
             effect->processSample (capture, wet, chCount, sctx);
@@ -396,24 +408,33 @@ private:
         return juce::jlimit (0.0, 1.0, elapsed / (double) st.currentBlock->lengthDiv);
     }
 
-    void fillLaneParams (int lane, LaneEffect* effect, const SceneSnapshot& scene)
+    /** Latch this lane's parameters for a trigger.
+
+        Reads the MODULATED values when they are available, not the raw scene values, so a
+        curve driving a latched parameter (Stutter's rate, Reverse's slice length) is sampled
+        at the trigger instant. That is the whole point of the latched/continuous split: a
+        latched parameter still responds to modulation, it just does so once per trigger
+        rather than per sample, which is what keeps a loop length from tearing mid-loop. */
+    void fillLaneParams (int lane, LaneEffect* effect, const SceneSnapshot& scene,
+                         const float* modulated)
     {
         const auto set = effect->getParamDescriptors();
         auto& out = laneParams[(size_t) lane];
         const auto& snap = scene.lanes[(size_t) lane];
         for (int i = 0; i < set.count && i < maxParamsPerLane; ++i)
-            out.set (i, snap.params[(size_t) i]);
+            out.set (i, modulated != nullptr ? modulated[paramIndex (lane, i)]
+                                             : snap.params[(size_t) i]);
     }
 
     void triggerBlockStart (LaneRuntimeState& st, LaneEffect* effect, int lane,
                             const Block* block, int divIndex, const CaptureBuffer& capture,
                             const SceneSnapshot& scene, double divisionLenSamples,
                             double divisionBarFraction, juce::int64 nowAbs,
-                            double ppqPerSample, bool isRetrigger)
+                            double ppqPerSample, bool isRetrigger, const float* modulated)
     {
         st.currentDivision = divIndex;
         st.currentBlock = block;
-        fillLaneParams (lane, effect, scene);
+        fillLaneParams (lane, effect, scene, modulated);
 
         BlockContext ctx;
         ctx.blockStartAbs = nowAbs;
@@ -435,7 +456,8 @@ private:
     void updateLaneLifecycle (LaneRuntimeState& st, LaneEffect* effect, int lane,
                               const Block* block, int divIndex, const CaptureBuffer& capture,
                               const SceneSnapshot& scene, double divisionLenSamples,
-                              double divisionBarFraction, juce::int64 nowAbs, double ppqPerSample)
+                              double divisionBarFraction, juce::int64 nowAbs, double ppqPerSample,
+                              const float* modulated)
     {
         const bool shouldBeActive = block != nullptr;
 
@@ -444,7 +466,7 @@ private:
             st.active = true;
             st.fadeDirection = 1;
             triggerBlockStart (st, effect, lane, block, divIndex, capture, scene,
-                               divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, false);
+                               divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, false, modulated);
         }
         else if (shouldBeActive && st.active && st.currentBlock != block)
         {
@@ -486,7 +508,7 @@ private:
             {
                 st.fadeDirection = 1;
                 triggerBlockStart (st, effect, lane, block, divIndex, capture, scene,
-                                   divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, true);
+                                   divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, true, modulated);
             }
         }
         else if (shouldBeActive && st.active && st.currentDivision != divIndex)
@@ -504,7 +526,7 @@ private:
             {
                 st.fadeDirection = 1;
                 triggerBlockStart (st, effect, lane, block, divIndex, capture, scene,
-                                   divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, true);
+                                   divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, true, modulated);
             }
             else if (st.fadeDirection < 0)
             {
