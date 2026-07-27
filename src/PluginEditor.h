@@ -5,6 +5,7 @@
 #include "ui/StutterLookAndFeel.h"
 #include "ui/HeaderBar.h"
 #include "ui/BlockGrid.h"
+#include "ui/SceneBrowser.h"
 #include "ui/BottomTabs.h"
 
 /**
@@ -30,6 +31,7 @@ private:
     stutter::ui::StutterLookAndFeel lookAndFeel;
 
     stutter::ui::HeaderBar headerBar;
+    stutter::ui::SceneBrowser sceneBrowser;
     stutter::ui::BlockGrid blockGrid;
     stutter::ui::BottomTabs bottomTabs;
 

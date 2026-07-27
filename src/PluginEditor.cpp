@@ -2,24 +2,34 @@
 
 namespace
 {
-constexpr int defaultWidth = 900;
-constexpr int defaultHeight = 620;
+constexpr int defaultWidth = 1200;
+constexpr int defaultHeight = 800;
 }
 
 StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor& p)
     : AudioProcessorEditor (&p),
       processorRef (p),
       headerBar (p),
+      sceneBrowser (p, p.getSceneDocument()),
       blockGrid (p, p.getSceneDocument()),
       bottomTabs (p)
 {
     setLookAndFeel (&lookAndFeel);
 
     addAndMakeVisible (headerBar);
+    addAndMakeVisible (sceneBrowser);
     addAndMakeVisible (blockGrid);
     addAndMakeVisible (bottomTabs);
 
     blockGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
+
+    // Picking a scene in the browser points the grid at it, so the two panes always show the
+    // same scene rather than drifting apart.
+    sceneBrowser.onSceneSelected = [this] (int sceneIndex)
+    {
+        blockGrid.setSceneIndex (sceneIndex);
+    };
+    blockGrid.setSceneIndex (sceneBrowser.getSelectedScene());
     bottomTabs.setSelectedLane (blockGrid.getSelectedLane());
 
     // Structural preset data (step grid + curve breakpoints) isn't APVTS-parameter-bound, so it
@@ -29,6 +39,7 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     {
         headerBar.refreshPresetLabel();
         blockGrid.repaint();
+        sceneBrowser.repaint();
         bottomTabs.refreshAfterPresetLoad();
     };
 
@@ -62,8 +73,9 @@ void StutterAudioProcessorEditor::resized()
     const float scale = (float) getWidth() / (float) defaultWidth;
 
     headerBar.setBounds (r.removeFromTop ((int) (72.0f * scale)));
+    sceneBrowser.setBounds (r.removeFromTop ((int) (56.0f * scale)));
 
-    auto bottomHeight = (int) (200.0f * scale);
+    auto bottomHeight = (int) (220.0f * scale);
     bottomTabs.setBounds (r.removeFromBottom (bottomHeight));
 
     blockGrid.setBounds (r);

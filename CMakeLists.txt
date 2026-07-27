@@ -49,6 +49,7 @@ target_sources(Stutter
         src/ui/HeaderBar.cpp
         src/ui/StepGrid.cpp
     src/ui/BlockGrid.cpp
+    src/ui/SceneBrowser.cpp
         src/ui/LaneParamPanel.cpp
         src/ui/CurveEditor.cpp
         src/ui/BottomTabs.cpp
