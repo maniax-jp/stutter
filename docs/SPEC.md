@@ -385,6 +385,29 @@ beats=4 × divisions=4 と厳密に一致するため、`buildScenesTreeFromStep
 必ず書くこと**。理由の無い更新は回帰の隠蔽と区別がつかない。詳細は
 `tests/fixtures/golden/README.md`。
 
+### ローカル検証
+
+```sh
+tools/fetch-pluginval.sh   # 初回のみ。CI と同じ pluginval を tools/bin へ
+tools/validate.sh          # VST3 を strictness 8 で検証
+```
+
+**タグを打つ前に必ず実行すること。** v2.0.0 の初回リリースは、ローカルのテストが全て
+通った状態で pluginval に落とされた。ctest とゴールデンゲートはこのクラスの不具合
+(スレッド安全性、パラメータのファズ、バス構成)を見ない。
+
+**合格しても所要時間を見ること。** pluginval のタイムアウトは1テストあたり30秒で、
+開発機は CI ランナーより速いため「遅いが通る」状態が起こりうる。実際 v2.0.0 の回帰は
+ローカルで45秒かけて**合格**し、CI では同じテストがタイムアウトした(修正後は16秒)。
+`validate.sh` は30秒を超えると警告する。
+
+**auval はこの開発機では実行できない。** 第三者製 AU が1つも登録されず、
+`auval -a` は Apple 製58個しか返さない。`/Library/Audio/Plug-Ins/Components` には
+市販プラグインが多数入っているが、AmpliTube 5 で試しても同じ
+`didn't find the component` で失敗する。環境要因でありプラグインの問題ではないので、
+`validate.sh` はこれを SKIP として報告する(第三者製 AU が1つでも登録されている環境
+では、その場合のみ本当の失敗として扱う)。AU の検証は CI が担う。
+
 ### CI
 
 `ctest` → `render_test` → ゴールデン比較 → ユニバーサルビルド検証(lipo)→

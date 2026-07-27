@@ -8,3 +8,6 @@ build/
 *.component
 /*.wav
 .DS_Store
+
+# Downloaded validation tools (fetch with tools/fetch-pluginval.sh)
+tools/bin/
