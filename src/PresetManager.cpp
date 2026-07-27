@@ -4,6 +4,7 @@
 #include "FactoryScenes.h"
 #include "dsp/ParameterIDs.h"
 #include "state/SceneSchema.h"
+#include "ui/SceneBrowser.h"
 
 namespace stutter
 {
@@ -56,6 +57,111 @@ void setParamValue (juce::ValueTree& parametersTree, const juce::String& paramId
     param.setProperty ("id", paramId, nullptr);
     param.setProperty ("value", value, nullptr);
     parametersTree.appendChild (param, nullptr);
+}
+
+/** Turn a v1 16-step grid into a single v2 scene.
+
+    v1's fixed grid is exactly beats=4 x divisions=4, so a step maps to a division with no
+    rounding: this is a re-encoding, not a re-interpretation. Runs of adjacent ON steps become
+    one block rather than N one-division blocks, which is the whole point of the block model --
+    under the old grid a lane restarted every 16th, so TapeStop never finished decelerating.
+    Merging preserves that for lanes where it does not matter and repairs it where it does.
+
+    Without this the patterns were simply dropped: the <Sequencer> node they used to live in is
+    stripped on load and read by nothing, so 20 of the 28 presets played silence. */
+juce::ValueTree buildScenesTreeFromSteps (StutterAudioProcessor& proc,
+                                          const FactoryPresetDef& def)
+{
+    const auto& stepsOn = def.stepsOn;
+
+    juce::ValueTree scenes (SceneIDs::scenesNode);
+    if (stepsOn.empty())
+        return scenes;
+
+    std::array<std::array<bool, numSteps>, numLanes> grid {};
+    for (auto& s : stepsOn)
+        if (s.lane >= 0 && s.lane < numLanes && s.step >= 0 && s.step < numSteps)
+            grid[(size_t) s.lane][(size_t) s.step] = true;
+
+    juce::ValueTree scene (SceneIDs::scene);
+    // Scene 60 (C4), not scene 0. These presets have no note mapping of their own, so the
+    // index is free -- and C4 is both where the scene browser opens and where the factory
+    // banks start, so the pattern is visible in the grid the moment the preset loads. Writing
+    // it to scene 0 plays correctly but shows the user an empty grid, which reads as a preset
+    // that failed to load.
+    scene.setProperty (SceneIDs::index, ui::SceneBrowser::defaultScene, nullptr);
+    scene.setProperty (SceneIDs::beats, 4, nullptr);
+    scene.setProperty (SceneIDs::divisions, 4, nullptr);
+    scene.setProperty (SceneIDs::swing, 0.0f, nullptr);
+
+    juce::ValueTree blocks (SceneIDs::blocksNode);
+    for (int l = 0; l < numLanes; ++l)
+    {
+        int step = 0;
+        while (step < numSteps)
+        {
+            if (! grid[(size_t) l][(size_t) step]) { ++step; continue; }
+
+            const int start = step;
+            while (step < numSteps && grid[(size_t) l][(size_t) step])
+                ++step;
+
+            juce::ValueTree b (SceneIDs::block);
+            b.setProperty (SceneIDs::laneRef, l, nullptr);
+            b.setProperty (SceneIDs::start, start, nullptr);
+            b.setProperty (SceneIDs::length, step - start, nullptr);
+            blocks.appendChild (b, nullptr);
+        }
+    }
+
+    scene.appendChild (blocks, nullptr);
+
+    // Copy the preset's parameter values into the scene as well. The scene is the authority
+    // once loaded: the mirror pushes its lane values into APVTS shortly after, so a scene that
+    // carries blocks but no parameters would overwrite the preset's own settings with the
+    // descriptor defaults -- the pattern would play with the wrong rate and decay.
+    juce::ValueTree laneParams (SceneIDs::laneParams);
+    for (int l = 0; l < numLanes; ++l)
+    {
+        auto* effect = proc.getBlockSequencerEffect (l);
+        if (effect == nullptr)
+            continue;
+
+        const auto set = effect->getParamDescriptors();
+        const auto prefix = ID::lanePrefix (l);
+
+        juce::ValueTree laneNode;
+        for (int p = 0; p < set.count && p < maxParamsPerLane; ++p)
+        {
+            const auto fullId = prefix + set[p].id;
+            for (const auto& pv : def.paramValues)
+            {
+                if (pv.paramId != fullId)
+                    continue;
+
+                if (! laneNode.isValid())
+                {
+                    laneNode = juce::ValueTree (SceneIDs::lane);
+                    laneNode.setProperty (SceneIDs::index, l, nullptr);
+                }
+
+                juce::ValueTree pn (SceneIDs::param);
+                pn.setProperty (SceneIDs::paramIndexProp, p, nullptr);
+                pn.setProperty (SceneIDs::value, pv.value, nullptr);
+                laneNode.appendChild (pn, nullptr);
+                break;
+            }
+        }
+
+        if (laneNode.isValid())
+            laneParams.appendChild (laneNode, nullptr);
+    }
+
+    if (laneParams.getNumChildren() > 0)
+        scene.appendChild (laneParams, nullptr);
+
+    scenes.appendChild (scene, nullptr);
+    return scenes;
 }
 
 juce::ValueTree buildSequencerTree (const std::vector<FactoryPresetDef::StepOn>& stepsOn)
@@ -155,8 +261,9 @@ juce::ValueTree buildCurvesTree (const std::vector<FactoryPresetDef::CurveDef>& 
 
 /** Assembles one full preset state (PARAMETERS root + Sequencer + Curves children), in exactly
     the same shape getStateInformation()/setStateInformation() serialise/parse. */
-juce::ValueTree buildFullStateTree (juce::AudioProcessorValueTreeState& apvts, const FactoryPresetDef& def)
+juce::ValueTree buildFullStateTree (StutterAudioProcessor& proc, const FactoryPresetDef& def)
 {
+    auto& apvts = proc.getAPVTS();
     auto tree = buildDefaultParametersTree (apvts);
 
     // Without this every factory preset is indistinguishable from v1 state and gets rejected
@@ -167,8 +274,13 @@ juce::ValueTree buildFullStateTree (juce::AudioProcessorValueTreeState& apvts, c
     for (auto& pv : def.paramValues)
         setParamValue (tree, pv.paramId, pv.value);
 
+    // The v1 <Sequencer> node is kept so these trees still match what a v1 user preset on
+    // disk looks like, but nothing reads it any more -- the blocks below are what plays.
     tree.appendChild (buildSequencerTree (def.stepsOn), nullptr);
     tree.appendChild (buildCurvesTree (def.curves), nullptr);
+
+    if (auto scenes = buildScenesTreeFromSteps (proc, def); scenes.getNumChildren() > 0)
+        tree.appendChild (scenes, nullptr);
 
     return tree;
 }
@@ -312,7 +424,7 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
             { "Filter", true, 4, {} },
             { "Pan",    true, 4, {} },
         };
-        return buildFullStateTree (proc.getAPVTS(), initDef);
+        return buildFullStateTree (proc, initDef);
     }
 
     if (entry.sceneBankIndex >= 0)
@@ -324,7 +436,7 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
         FactoryPresetDef bare;
         bare.name = entry.name;
         bare.category = entry.category;
-        auto tree = buildFullStateTree (proc.getAPVTS(), bare);
+        auto tree = buildFullStateTree (proc, bare);
 
         auto scenes = FactoryScenes::createBank (entry.sceneBankIndex);
         if (! scenes.isValid())
@@ -335,7 +447,7 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
 
     for (auto& def : getFactoryPresetDefs())
         if (def.name == entry.name)
-            return buildFullStateTree (proc.getAPVTS(), def);
+            return buildFullStateTree (proc, def);
 
     return {};
 }

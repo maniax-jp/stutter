@@ -4,6 +4,7 @@
 #include "TestHelpers.h"
 #include "PresetManager.h"
 #include "FactoryScenes.h"
+#include "ui/SceneBrowser.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/ModulationEngine.h"
 
@@ -526,12 +527,26 @@ TEST_CASE ("A routed curve audibly changes the rendered output", "[effects][modu
 
 namespace
 {
-/** Mean absolute difference between the processed signal and the dry input. */
+/** Mean absolute difference between the processed signal and the dry input.
+
+    The probe signal is deliberately not the shared test sine. Buffer-category lanes work by
+    replaying a slice of captured audio, and replaying a slice of a *constant* tone reproduces
+    that tone sample for sample -- a working Stutter measures as zero difference. Adding
+    per-beat amplitude steps and a sparse impulse train gives the replay something to be
+    misaligned against, so the metric reflects whether the effect ran rather than whether the
+    source happened to be self-similar. */
 double processedDelta (StutterAudioProcessor& proc)
 {
-    constexpr int numSamples = 48000;
+    // Two bars at 120 BPM. One second only reaches division 7 of a 16-division pattern, so a
+    // preset whose blocks sit in the second half of the bar -- several do -- would be scored
+    // on a stretch of time it never plays in.
+    constexpr int numSamples = 48000 * 4;
     juce::AudioBuffer<float> buf (2, numSamples);
     stutter::test::fillTestSignal (buf);
+
+    for (int c = 0; c < buf.getNumChannels(); ++c)
+        for (int i = 0; i < numSamples; i += 1000)
+            buf.setSample (c, i, buf.getSample (c, i) + 0.6f);
 
     juce::AudioBuffer<float> dry (2, numSamples);
     dry.makeCopyOf (buf);
@@ -552,34 +567,42 @@ double processedDelta (StutterAudioProcessor& proc)
 }
 }
 
-TEST_CASE ("Factory presets are not silently substituted by Init", "[presets][audio]")
+TEST_CASE ("Factory scene banks are not silently substituted by Init", "[presets][audio]")
 {
-    StutterAudioProcessor proc;
-    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
-    stutter::PresetManager pm (proc);
+    // Each bank gets a fresh processor. Loading them in sequence on one instance lets the
+    // previous bank's scenes stay live when the next load leaves them untouched, so an inert
+    // preset reads as audible -- the measurement would confirm itself.
+    StutterAudioProcessor probe;
+    probe.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager probeList (probe);
 
-    const auto& entries = pm.getPresets();
-    REQUIRE (entries.size() > 1);
+    std::vector<juce::String> bankNames;
+    for (const auto& e : probeList.getPresets())
+        if (e.sceneBankIndex >= 0)
+            bankNames.push_back (e.name);
 
-    int audible = 0;
-    std::vector<juce::String> inert;
+    REQUIRE (bankNames.size() == (size_t) FactoryScenes::getNumBanks());
 
-    for (int i = 0; i < (int) entries.size(); ++i)
+    for (const auto& wanted : bankNames)
     {
-        pm.loadPreset (i);
-        // Scene banks are MIDI-played, so in Auto mode only the scene the engine starts on
-        // sounds; that is enough to prove the bank reached the audio path at all.
-        if (processedDelta (proc) > 1.0e-6)
-            ++audible;
-        else if (entries[(size_t) i].name != "Init")
-            inert.push_back (entries[(size_t) i].name);
-    }
+        StutterAudioProcessor proc;
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        stutter::PresetManager pm (proc);
 
-    juce::String names;
-    for (auto& n : inert) names << n << ", ";
-    INFO ("presets leaving the signal untouched: " << (int) inert.size() << " -- " << names);
-    CHECK (inert.empty());
-    CHECK (audible > 0);
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == wanted)
+            {
+                idx = i;
+                break;
+            }
+        REQUIRE (idx >= 0);
+
+        pm.loadPreset (idx);
+
+        INFO ("bank: " << wanted);
+        CHECK (processedDelta (proc) > 1.0e-6);
+    }
 }
 
 TEST_CASE ("Every factory scene bank reaches the audio path", "[presets][scenes]")
@@ -646,4 +669,106 @@ TEST_CASE ("A freshly loaded preset is not marked dirty", "[presets][ui]")
     // shows as modified the instant it is chosen.
     proc.pumpSceneMirror();
     CHECK_FALSE (pm.isDirty());
+}
+
+TEST_CASE ("Every rhythmic factory preset actually plays", "[presets][audio]")
+{
+    // Same isolation rule as the bank test: one fresh processor per preset, because a preset
+    // that changes nothing would otherwise be scored on the previous preset's scenes.
+    StutterAudioProcessor probe;
+    probe.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager probeList (probe);
+
+    std::vector<juce::String> names;
+    for (const auto& e : probeList.getPresets())
+        if (e.isFactory && e.sceneBankIndex < 0 && e.name != "Init")
+            names.push_back (e.name);
+
+    REQUIRE (names.size() > 20);
+
+    std::vector<juce::String> inert;
+    for (const auto& wanted : names)
+    {
+        StutterAudioProcessor proc;
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        stutter::PresetManager pm (proc);
+
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == wanted)
+            {
+                idx = i;
+                break;
+            }
+        REQUIRE (idx >= 0);
+        pm.loadPreset (idx);
+
+        if (processedDelta (proc) <= 1.0e-6)
+            inert.push_back (wanted);
+    }
+
+    juce::String report;
+    for (auto& n : inert) report << n << ", ";
+    INFO ("presets that leave the signal untouched: " << (int) inert.size() << " -- " << report);
+    CHECK (inert.empty());
+}
+
+TEST_CASE ("A converted preset's blocks land on the scene the editor shows", "[presets][ui]")
+{
+    // The audio path and the editor pick their scene independently: the gesture engine plays
+    // whatever state load selected, while the grid opens on SceneBrowser's default. When those
+    // disagree the preset sounds right and looks empty, which reads as a failed load.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int idx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].name == "Classic Stutter Build")
+            idx = i;
+    REQUIRE (idx >= 0);
+    pm.loadPreset (idx);
+
+    const int shown = stutter::ui::SceneBrowser::defaultScene;
+    const auto* scene = proc.getSceneStore().get (shown);
+    REQUIRE (scene != nullptr);
+
+    INFO ("scene the editor opens on: " << shown);
+    CHECK (scene->populated);
+    CHECK (scene->hasAnyBlocks());
+
+    // And the engine must be playing that same scene, or it sounds like a different preset.
+    CHECK (proc.getGestureEngine().getActiveScene() == shown);
+}
+
+TEST_CASE ("A converted preset keeps its parameter values after mirroring", "[presets][audio]")
+{
+    // The scene becomes the authority the moment it loads: the mirror pushes its lane values
+    // into APVTS a beat later. A converted scene that carried blocks but no parameters would
+    // therefore reset the preset's own settings to the descriptor defaults -- the pattern kept
+    // playing, but with the wrong rate and no decay, which is a subtler wrong than silence.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int idx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].name == "Classic Stutter Build")
+            idx = i;
+    REQUIRE (idx >= 0);
+    pm.loadPreset (idx);
+
+    const auto rateId  = ID::lanePrefix (0) + ID::stutterRate;
+    const auto decayId = ID::lanePrefix (0) + ID::stutterDecay;
+
+    const float rateAfterLoad  = proc.getAPVTS().getRawParameterValue (rateId)->load();
+    const float decayAfterLoad = proc.getAPVTS().getRawParameterValue (decayId)->load();
+    CHECK_THAT (decayAfterLoad, WithinAbs (0.7f, 1.0e-4f));
+
+    proc.pumpSceneMirror();
+
+    CHECK_THAT (proc.getAPVTS().getRawParameterValue (rateId)->load(),
+                WithinAbs (rateAfterLoad, 1.0e-4f));
+    CHECK_THAT (proc.getAPVTS().getRawParameterValue (decayId)->load(),
+                WithinAbs (decayAfterLoad, 1.0e-4f));
 }

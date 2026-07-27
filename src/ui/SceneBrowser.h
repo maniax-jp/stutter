@@ -24,6 +24,11 @@ namespace stutter::ui
 class SceneBrowser : public juce::Component, private juce::Timer
 {
 public:
+    /** The scene the browser opens on: C4, the bottom of the visible keyboard. Factory content
+        targets this so a freshly loaded preset is visible in the grid rather than sitting on a
+        scene the editor is not showing. */
+    static constexpr int defaultScene = 60;
+
     SceneBrowser (StutterAudioProcessor& processor, SceneDocument& document);
     ~SceneBrowser() override;
 
@@ -51,7 +56,7 @@ private:
     StutterAudioProcessor& proc;
     SceneDocument& doc;
 
-    int selectedScene = 60;
+    int selectedScene = defaultScene;
     int hoveredNote = -1;
     int lastActiveScene = -1;
 
