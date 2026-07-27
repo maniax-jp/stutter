@@ -337,13 +337,26 @@ void BlockGrid::paint (juce::Graphics& g)
     g.setColour (Palette::bg0);
     g.fillRect (gridArea);
 
+    // Division lines need to be visible against bg0, and bg2 is only 16 levels above it --
+    // in practice invisible, which made a 16-division grid read as four wide columns with
+    // only the beat lines showing. Brightened relative to the background rather than swapped
+    // for a palette entry, so the ratio holds if the palette is retuned.
     for (int d = 0; d <= divs; ++d)
     {
         const float x = (float) gridArea.getX() + (float) d * getDivisionWidth();
         const bool isBeat = (d % juce::jmax (1, divisionsPerBeat)) == 0;
-        g.setColour (isBeat ? Palette::bg3 : Palette::bg2);
+        g.setColour (isBeat ? Palette::bg3.brighter (0.45f) : Palette::bg3.withAlpha (0.55f));
         g.fillRect (x - 0.5f, (float) gridArea.getY(), isBeat ? 1.5f : 1.0f,
                     (float) gridArea.getHeight());
+    }
+
+    // Lane separators. Without them twelve empty lanes are one undifferentiated field, and
+    // the label column is the only thing telling you where a row begins.
+    for (int lane = 1; lane < maxLanes; ++lane)
+    {
+        const float y = (float) gridArea.getY() + (float) lane * rowH;
+        g.setColour (Palette::bg2);
+        g.fillRect ((float) gridArea.getX(), y - 0.5f, (float) gridArea.getWidth(), 1.0f);
     }
 
     // --- Blocks --------------------------------------------------------------------------
