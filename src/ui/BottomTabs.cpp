@@ -53,6 +53,11 @@ void BottomTabs::setSelectedLane (int laneIndex)
     repaint();
 }
 
+void BottomTabs::setSceneIndex (int sceneIndex)
+{
+    modRoutePanel.setSceneIndex (sceneIndex);
+}
+
 void BottomTabs::refreshAfterPresetLoad()
 {
     // Re-sync the lane panel title/knobs are already handled by attachments; just repaint
@@ -62,6 +67,11 @@ void BottomTabs::refreshAfterPresetLoad()
     volumeCurveEditor.refreshAfterPresetLoad();
     filterCurveEditor.refreshAfterPresetLoad();
     panCurveEditor.refreshAfterPresetLoad();
+
+    // The route table is rows of child components built from the scene's curves, not something
+    // paint() derives, so a repaint alone would keep showing the previous preset's routes.
+    modRoutePanel.refresh();
+
     repaint();
 }
 

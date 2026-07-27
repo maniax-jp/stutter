@@ -3,6 +3,7 @@
 
 #include "TestHelpers.h"
 #include "FactoryScenes.h"
+#include "ui/SceneBrowser.h"
 
 using namespace stutter;
 using Catch::Matchers::WithinAbs;
@@ -485,4 +486,31 @@ TEST_CASE ("Scene work survives a host save/restore round-trip", "[state][roundt
                 CHECK_THAT (lb.params[(size_t) p], WithinAbs (la.params[(size_t) p], 1.0e-6));
         }
     }
+}
+
+TEST_CASE ("Factory modulation routes live on the scene the editor opens on", "[presets][ui]")
+{
+    // The MOD panel reads curves from whichever scene index it was pointed at. Nothing used to
+    // point it anywhere, so it sat on scene 0 while the grid and browser followed the user --
+    // and since factory content starts at C4, the route table was empty for every preset that
+    // actually had routes.
+    auto bank = FactoryScenes::createBank (2);   // "Routed Modulation"
+    REQUIRE (bank.isValid());
+
+    int scenesWithCurves = 0, onDefaultScene = 0;
+    for (int i = 0; i < bank.getNumChildren(); ++i)
+    {
+        const auto scene = bank.getChild (i);
+        const auto curves = scene.getChildWithName (SceneIDs::curvesNode);
+        if (! curves.isValid() || curves.getNumChildren() == 0)
+            continue;
+
+        ++scenesWithCurves;
+        if ((int) scene.getProperty (SceneIDs::index, -1) == ui::SceneBrowser::defaultScene)
+            ++onDefaultScene;
+    }
+
+    CHECK (scenesWithCurves > 0);
+    INFO ("the editor opens on scene " << ui::SceneBrowser::defaultScene);
+    CHECK (onDefaultScene > 0);
 }

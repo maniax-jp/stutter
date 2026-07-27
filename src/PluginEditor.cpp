@@ -28,8 +28,10 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     sceneBrowser.onSceneSelected = [this] (int sceneIndex)
     {
         blockGrid.setSceneIndex (sceneIndex);
+        bottomTabs.setSceneIndex (sceneIndex);
     };
     blockGrid.setSceneIndex (sceneBrowser.getSelectedScene());
+    bottomTabs.setSceneIndex (sceneBrowser.getSelectedScene());
     bottomTabs.setSelectedLane (blockGrid.getSelectedLane());
 
     // Structural preset data (step grid + curve breakpoints) isn't APVTS-parameter-bound, so it

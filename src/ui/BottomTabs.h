@@ -18,6 +18,12 @@ public:
 
     void setSelectedLane (int laneIndex);
 
+    /** Point the modulation table at the scene the rest of the editor is showing. Without this
+        the MOD tab stays on scene 0 while the grid and browser follow the user, so it lists a
+        different scene's routes -- in practice an empty table, since factory content lives from
+        C4 up. */
+    void setSceneIndex (int sceneIndex);
+
     /** Forces all child views (lane knobs / curve editors) to repaint immediately -- used after
         a preset load, since curve breakpoints and step-grid data aren't APVTS parameters and so
         don't auto-refresh via attachment listeners the way sliders/combo boxes do. */
