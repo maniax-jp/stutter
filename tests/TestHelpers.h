@@ -26,7 +26,8 @@ inline constexpr int blockSize = 512;
 inline constexpr double bpm = 120.0;
 inline constexpr int numBars = 4;
 
-/** NOISE_FIX.md's pass/fail bar for a severe click. */
+/** Pass/fail bar for a severe click: an adjacent-sample delta this large is a splice
+    artefact rather than signal, at any level a musical source reaches. */
 inline constexpr double clickThreshold = 0.3;
 
 /** A continuous 220Hz sine at full scale can only move this far between samples

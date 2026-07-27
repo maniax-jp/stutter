@@ -394,6 +394,10 @@ juce::AudioBuffer<float> renderLane (int lane, int chunkSize, juce::uint32 seed)
     return out;
 }
 
+/** True when two renders are bit-identical. Deliberately an exact comparison: these
+    effects are seeded, so "close enough" would let a real determinism regression through. */
+bool bitIdentical (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b);
+
 double maxDiff (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
 {
     double m = 0.0;
@@ -403,6 +407,11 @@ double maxDiff (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float
             m = juce::jmax (m, std::abs ((double) a.getReadPointer (c)[i]
                                          - (double) b.getReadPointer (c)[i]));
     return m;
+}
+
+bool bitIdentical (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+{
+    return ! (maxDiff (a, b) > 0.0);
 }
 } // namespace
 
@@ -426,12 +435,12 @@ TEST_CASE ("The v2 effects are audible, clean, and deterministic", "[effects]")
         CHECK (metrics.severeClickCount == 0);  // and does not click
 
         // Same seed, same chunking.
-        CHECK (maxDiff (a, renderLane (lc.lane, 512, 1234u)) == 0.0);
+        CHECK (bitIdentical (a, renderLane (lc.lane, 512, 1234u)));
 
         // Same seed, DIFFERENT chunking. This is the check a global RNG fails: it would make
         // output depend on how the host happened to split the buffer, so an offline bounce
         // would stop matching what was heard.
-        CHECK (maxDiff (a, renderLane (lc.lane, 128, 1234u)) == 0.0);
+        CHECK (bitIdentical (a, renderLane (lc.lane, 128, 1234u)));
     }
 }
 

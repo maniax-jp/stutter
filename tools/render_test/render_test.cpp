@@ -60,7 +60,7 @@ constexpr double kSampleRate = 48000.0;
 constexpr int kBlockSize = 512;
 constexpr double kBpm = 120.0;
 constexpr int kNumBars = 4;
-constexpr double kClickThreshold = 0.3; // NOISE_FIX.md pass/fail bar: severe-click adjacent-sample delta
+constexpr double kClickThreshold = 0.3; // severe-click bar: adjacent-sample delta
 
 // A single continuous 220Hz sine at full amplitude has a maximum possible sample-to-sample
 // delta of ~0.0288 (2*pi*f/sr). Any splice/discontinuity artifact shows up as a delta well
@@ -92,7 +92,7 @@ static const LaneSpec kLanes[] = {
 struct Metrics
 {
     float maxAdjacentDelta = 0.0f;
-    int severeClickCount = 0;      // deltas > kClickThreshold (0.3, NOISE_FIX.md's literal bar)
+    int severeClickCount = 0;      // deltas > kClickThreshold (0.3)
     int discontinuityCount = 0;    // deltas > kDiscontinuityThreshold (tighter, discriminates splice noise)
     double rms = 0.0;
     int numSamples = 0;
@@ -152,7 +152,7 @@ void fillTestSignal (juce::AudioBuffer<float>& buf, double sampleRate, double bp
     }
 }
 
-// internalBpm is APVTS-owned (see docs/ISSUES.md 2.2); processBlock reads it via
+// internalBpm is APVTS-owned; processBlock reads it via
 // getRawParameterValue(), so tests must set it the same way a host/preset would.
 void setInternalBpm (StutterAudioProcessor& processor, double bpm)
 {
