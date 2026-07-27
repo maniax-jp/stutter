@@ -25,10 +25,6 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
   ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/`
 - カスタムダークUI(1200×800、比率固定リサイズ、発光プレイヘッド、ドラッグ描画グリッド)
 
-> **v1.1.2 との互換性はありません。** v1 で保存したプロジェクトの状態は読み込まず、
-> Init にフォールバックします(バージョンガードによる意図的な判断)。v1 のファクトリー
-> プリセット28個は v2 のブロックへ変換して同梱しています。
-
 ## インストール
 
 [リリースページ](https://github.com/maniax-jp/stutter/releases/latest)から
@@ -54,11 +50,7 @@ xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Stutter.vst3
 xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Stutter.component
 ```
 
-**Standalone アプリ** — Finder で右クリック →「開く」、または
-システム設定 → プライバシーとセキュリティ →「このまま開く」。
-
-自分でビルドした場合はこの操作は不要です(ビルド方法は
-[SPEC.md](docs/SPEC.md#ビルド)を参照)。
+**Standalone アプリ** — システム設定 → プライバシーとセキュリティ →「このまま開く」。
 
 ## ドキュメント
 
@@ -66,8 +58,6 @@ xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Stutter.compo
 |---|---|
 | [MANUAL.md](docs/MANUAL.md) | 使いかた(音楽制作者向け) |
 | [SPEC.md](docs/SPEC.md) | 設計の意図・State スキーマ・ビルド・検証・既知の制約 |
-
-個々のクラスの詳細は各ヘッダの doc comment が一次情報です。
 
 ## License
 
