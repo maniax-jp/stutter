@@ -593,6 +593,69 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 void StutterAudioProcessor::timerCallback()
 {
     sceneStore.collectGarbage();
+    mirrorActiveSceneToApvts();
+}
+
+void StutterAudioProcessor::mirrorActiveSceneToApvts()
+{
+    // The audio thread only ever flags which scene became active; it never touches APVTS.
+    // This runs on the message thread and does the actual parameter writes, which is what
+    // keeps a MIDI-triggered scene change off the audio thread's critical path.
+    const int scene = gestureEngine.consumePendingMirror();
+    if (scene < 0 || sceneDocument == nullptr)
+        return;
+
+    auto sceneTree = sceneDocument->ensureScene (scene);
+    if (! sceneTree.isValid())
+        return;
+
+    auto laneParams = sceneTree.getChildWithName (stutter::SceneIDs::laneParams);
+
+    // Suppress the write-back listener for the duration. Without this the parameter changes
+    // below would be read as user edits and written straight back into the scene we are
+    // mirroring FROM -- a feedback loop that would also mark every scene switch as a
+    // document edit.
+    const juce::ScopedValueSetter<bool> guard (suppressParamWriteback, true);
+
+    for (int lane = 0; lane < stutter::maxLanes; ++lane)
+    {
+        auto* effect = blockSequencer.getLaneEffect (lane);
+        if (effect == nullptr)
+            continue;
+
+        const auto set = effect->getParamDescriptors();
+
+        // Locate this lane's stored values, if the scene has any. A scene that omits the
+        // lane mirrors the descriptor defaults instead, matching what the audio thread is
+        // actually rendering (see SceneSchema::setLaneDefaults).
+        juce::ValueTree laneNode;
+        if (laneParams.isValid())
+            for (int i = 0; i < laneParams.getNumChildren(); ++i)
+                if ((int) laneParams.getChild (i).getProperty (stutter::SceneIDs::index, -1) == lane)
+                    laneNode = laneParams.getChild (i);
+
+        for (int p = 0; p < set.count && p < stutter::maxParamsPerLane; ++p)
+        {
+            float value = set[p].defaultValue;
+
+            if (laneNode.isValid())
+                for (int c = 0; c < laneNode.getNumChildren(); ++c)
+                {
+                    const auto pt = laneNode.getChild (c);
+                    if (pt.hasType (stutter::SceneIDs::param)
+                        && (int) pt.getProperty (stutter::SceneIDs::paramIndexProp, -1) == p)
+                        value = (float) pt.getProperty (stutter::SceneIDs::value, value);
+                }
+
+            if (auto* param = apvts.getParameter (ID::lanePrefix (lane) + set[p].id))
+            {
+                const auto& range = apvts.getParameterRange (ID::lanePrefix (lane) + set[p].id);
+                param->setValueNotifyingHost (range.convertTo0to1 (value));
+            }
+        }
+    }
+
+    mirroredScene = scene;
 }
 
 void StutterAudioProcessor::loadInitState()

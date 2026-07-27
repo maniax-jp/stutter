@@ -94,6 +94,11 @@ private:
     void timerCallback() override;
     void loadInitState();
 
+    /** Push the active scene's parameter values into APVTS so the UI and the host see what
+        is actually playing. Message thread only; see the implementation for why the
+        write-back listener must be suppressed while it runs. */
+    void mirrorActiveSceneToApvts();
+
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
         split into successive calls to this. */
@@ -130,6 +135,11 @@ public:
 
     juce::UndoManager& getUndoManager() noexcept { return undoManager; }
 
+    /** Run one mirror pass immediately. The shipping path is the processor's timer; this is
+        exposed so the offline harness can drive it deterministically rather than depending
+        on message-loop scheduling. */
+    void pumpSceneMirror() { mirrorActiveSceneToApvts(); }
+
     /** Current division for the block grid's playhead, or -1 when idle. */
     int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
 
@@ -155,6 +165,13 @@ private:
 
     /** Which scene the chain order was last sorted for; -1 forces a re-sort. */
     int lastChainOrderScene = -1;
+
+    /** Set while mirrorActiveSceneToApvts is writing, so the parameter listener can tell a
+        mirror write from a genuine user edit. Message thread only. */
+    bool suppressParamWriteback = false;
+
+    /** Which scene APVTS currently reflects; -1 before the first mirror. */
+    int mirroredScene = -1;
 
     juce::UndoManager undoManager;
     std::unique_ptr<stutter::SceneDocument> sceneDocument;

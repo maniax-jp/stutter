@@ -2277,6 +2277,90 @@ bool testFactoryScenes()
     return ok;
 }
 
+// (n) The APVTS mirror: switching scenes updates the parameters the UI and host see.
+//
+// Without this a MIDI-triggered scene change alters what is heard but leaves every knob
+// showing the previous scene's values -- the plugin would sound one way and look another.
+// The feedback check matters as much as the mirroring: the parameter writes must not be
+// read back as user edits, or every scene switch would silently rewrite the scene it came
+// from.
+bool testApvtsMirror()
+{
+    printf ("\n[Test N] APVTS mirrors the active scene\n");
+
+    using namespace stutter;
+    bool ok = true;
+    auto check = [&ok] (const char* what, bool cond)
+    {
+        if (! cond) { printf ("  FAIL: %s\n", what); ok = false; }
+    };
+
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+    proc.prepareToPlay (kSampleRate, kBlockSize);
+
+    auto& apvts = proc.getAPVTS();
+    auto& doc = proc.getSceneDocument();
+    auto& engine = proc.getGestureEngine();
+
+    // Give two scenes distinguishable values for the same parameter. Filter cutoff is a
+    // convenient probe: wide range, and continuous so the value round-trips exactly.
+    const juce::String cutoffId = ID::lanePrefix (StutterAudioProcessor::laneFilter) + "cutoff";
+
+    auto setSceneCutoff = [&doc] (int sceneIdx, float hz)
+    {
+        auto scene = doc.ensureScene (sceneIdx);
+        auto lp = scene.getOrCreateChildWithName (SceneIDs::laneParams, nullptr);
+        juce::ValueTree laneNode (SceneIDs::lane);
+        laneNode.setProperty (SceneIDs::index, StutterAudioProcessor::laneFilter, nullptr);
+        juce::ValueTree pt (SceneIDs::param);
+        pt.setProperty (SceneIDs::paramIndexProp, 1, nullptr);   // descriptor slot 1 = cutoff
+        pt.setProperty (SceneIDs::value, hz, nullptr);
+        laneNode.appendChild (pt, nullptr);
+        lp.appendChild (laneNode, nullptr);
+    };
+
+    setSceneCutoff (10, 400.0f);
+    setSceneCutoff (11, 8000.0f);
+    doc.publish();
+
+    // Drive the mirror the way the audio thread would: flag a scene, then let the timer run.
+    auto switchAndMirror = [&] (int sceneIdx)
+    {
+        // Drive it the way a player would -- a note-on, which is what selects a scene in
+        // MIDI mode. Setting the scene directly first would make the trigger a no-op and
+        // silently skip the mirror.
+        juce::MidiBuffer m;
+        m.addEvent (juce::MidiMessage::noteOn (1, sceneIdx, 1.0f), 0);
+        juce::AudioBuffer<float> b (2, kBlockSize);
+        b.clear();
+        proc.processBlock (b, m);
+
+        // The mirror normally runs on the processor's timer; drive it directly here so the
+        // test does not depend on message-loop scheduling.
+        proc.pumpSceneMirror();
+    };
+
+    switchAndMirror (10);
+    const float after10 = apvts.getRawParameterValue (cutoffId)->load();
+
+    switchAndMirror (11);
+    const float after11 = apvts.getRawParameterValue (cutoffId)->load();
+
+    printf ("  scene 10 -> cutoff %.1f Hz, scene 11 -> cutoff %.1f Hz\n", after10, after11);
+    check ("scene 10 mirrors its own cutoff", std::abs (after10 - 400.0f) < 5.0f);
+    check ("scene 11 mirrors its own cutoff", std::abs (after11 - 8000.0f) < 50.0f);
+
+    // No feedback: mirroring scene 11 must not have rewritten scene 10.
+    switchAndMirror (10);
+    const float back10 = apvts.getRawParameterValue (cutoffId)->load();
+    printf ("  returning to scene 10 -> cutoff %.1f Hz\n", back10);
+    check ("switching away and back preserves the original scene",
+           std::abs (back10 - 400.0f) < 5.0f);
+
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -2426,8 +2510,9 @@ int main (int argc, char* argv[])
     const bool testKPass = testSceneDocument();
     const bool testLPass = testNewEffects();
     const bool testMPass = testFactoryScenes();
+    const bool testNPass = testApvtsMirror();
     if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
-        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass || ! testLPass || ! testMPass)
+        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass || ! testLPass || ! testMPass || ! testNPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");

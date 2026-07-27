@@ -442,7 +442,14 @@ SceneSnapshot SceneSchema::sceneFromTree (const juce::ValueTree& sceneTree)
                 if (! lt.hasType (SceneIDs::lane))
                     continue;
 
-                const int idx = getPropInt (lt, SceneIDs::laneRef, -1);
+                // Accept either spelling. The schema doc and FactoryScenes write "index";
+                // sceneToTree writes "lane". They disagreed silently for a while, and the
+                // symptom was invisible -- a scene's lane parameters were simply ignored and
+                // the defaults used instead, which sounds plausible rather than broken.
+                // Reading both means an existing tree of either shape still loads.
+                int idx = getPropInt (lt, SceneIDs::index, -1);
+                if (idx < 0)
+                    idx = getPropInt (lt, SceneIDs::laneRef, -1);
                 if (idx < 0 || idx >= maxLanes)
                     continue;
 
@@ -559,7 +566,7 @@ juce::ValueTree SceneSchema::sceneToTree (const SceneSnapshot& scene, int index)
         {
             const auto& ls = scene.lanes[static_cast<size_t> (lane)];
             juce::ValueTree lt (SceneIDs::lane);
-            lt.setProperty (SceneIDs::laneRef, lane, nullptr);
+            lt.setProperty (SceneIDs::index, lane, nullptr);
             lt.setProperty (SceneIDs::mix, ls.mix, nullptr);
             lt.setProperty (SceneIDs::gain, ls.gain, nullptr);
             lt.setProperty (SceneIDs::pan, ls.pan, nullptr);

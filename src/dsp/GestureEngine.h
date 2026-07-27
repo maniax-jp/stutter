@@ -95,9 +95,16 @@ public:
             noteToScene[(size_t) i].store ((int8_t) i, std::memory_order_relaxed);
     }
 
+    /** Select a scene directly, e.g. from the scene browser. Flags a mirror like a MIDI
+        trigger does -- clicking a scene in the UI must update the visible parameters for the
+        same reason playing a note does, and forgetting that here would make the browser and
+        the keyboard behave differently for no reason the user could see. */
     void setActiveScene (int index) noexcept
     {
-        activeScene.store (juce::jlimit (0, maxScenes - 1, index), std::memory_order_relaxed);
+        const int clamped = juce::jlimit (0, maxScenes - 1, index);
+        const int previous = activeScene.exchange (clamped, std::memory_order_relaxed);
+        if (previous != clamped)
+            pendingMirrorScene.store (clamped, std::memory_order_release);
     }
 
     int getActiveScene() const noexcept { return activeScene.load (std::memory_order_relaxed); }
