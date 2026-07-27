@@ -436,6 +436,10 @@ tools/render_test/  WAV レンダリング用ハーネス
 - **`loopPolicy` は Forward のみ実装**。Palindrome / OneShot は保存・復元されるが
   `BlockSequencer` は PPQ から位置を導くだけで常に前進し、`reverseDirection` は false 固定。
   設定する UI が無いためユーザーが未実装パスに到達することはない
+- **Texture チェーンの並べ替え UI がない**。`chainPosition` はシーケンサーが毎ブロック
+  ソートに使っているが、全レーンが 0 のままで設定手段が無いため、実効順序は常にレーン
+  順(グリッドの上から下)になる。既定の挙動としては筋が通っており壊れてはいないが、
+  SPEC が Effectrix / ShaperBox 由来として挙げたドラッグ並べ替えは未実現
 - **`LiveParamOverlay` は未使用**。ノブ編集は APVTS 経由でシーンへ書き戻される
   (`writeLaneParamToScene`)。SPEC が想定した「バンク再構築を避ける高速パス」は
   現状使っていない
