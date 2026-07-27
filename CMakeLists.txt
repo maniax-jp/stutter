@@ -82,8 +82,48 @@ target_link_libraries(Stutter
         juce::juce_recommended_warning_flags
 )
 
-# ---- Offline DSP verification harness (optional, not part of the shipped plugin) ----
-option(STUTTER_BUILD_TESTS "Build the offline render_test verification harness" OFF)
+# ---- Tests (optional, not part of the shipped plugin) ----
+#
+# Two targets with different jobs:
+#   stutter_tests  Catch2 unit/integration suites. This is the gate.
+#   render_test    renders each lane to a WAV for listening. Not a unit test -- producing
+#                  audio a human can audition is not something Catch2 should be asked to do,
+#                  and the golden-baseline gate consumes its output.
+option(STUTTER_BUILD_TESTS "Build the test targets" OFF)
 if (STUTTER_BUILD_TESTS)
+    # Both test targets compile the plugin sources directly rather than linking the plugin
+    # target, because juce_add_plugin produces format wrappers rather than a plain library.
+    # Shared here so the two lists cannot drift -- they did once, and the symptom was a
+    # target failing to link for reasons unrelated to the change being made.
+    set(STUTTER_PLUGIN_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/PluginProcessor.cpp
+        ${CMAKE_SOURCE_DIR}/src/PluginEditor.cpp
+        ${CMAKE_SOURCE_DIR}/src/PresetManager.cpp
+        ${CMAKE_SOURCE_DIR}/src/FactoryPresets.cpp
+        ${CMAKE_SOURCE_DIR}/src/FactoryScenes.cpp
+        ${CMAKE_SOURCE_DIR}/src/dsp/ParameterLayout.cpp
+        ${CMAKE_SOURCE_DIR}/src/state/SceneStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/state/SceneSchema.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/StutterLookAndFeel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/HeaderBar.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/BlockGrid.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/SceneBrowser.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ModRoutePanel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/LaneParamPanel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/CurveEditor.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/BottomTabs.cpp
+    )
+
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.5.2
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS TRUE
+    )
+    FetchContent_MakeAvailable(Catch2)
+
+    enable_testing()
+    add_subdirectory(tests)
     add_subdirectory(tools/render_test)
 endif()

@@ -5,22 +5,7 @@
 
 add_executable(render_test
     render_test.cpp
-    ${CMAKE_SOURCE_DIR}/src/PluginProcessor.cpp
-    ${CMAKE_SOURCE_DIR}/src/dsp/ParameterLayout.cpp
-    ${CMAKE_SOURCE_DIR}/src/PluginEditor.cpp
-    ${CMAKE_SOURCE_DIR}/src/PresetManager.cpp
-    ${CMAKE_SOURCE_DIR}/src/FactoryPresets.cpp
-    ${CMAKE_SOURCE_DIR}/src/FactoryScenes.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/StutterLookAndFeel.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/HeaderBar.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/BlockGrid.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/SceneBrowser.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ModRoutePanel.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/LaneParamPanel.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/CurveEditor.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/BottomTabs.cpp
-    ${CMAKE_SOURCE_DIR}/src/state/SceneStore.cpp
-    ${CMAKE_SOURCE_DIR}/src/state/SceneSchema.cpp
+    ${STUTTER_PLUGIN_SOURCES}
 )
 
 target_include_directories(render_test
