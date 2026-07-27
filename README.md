@@ -5,7 +5,7 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
 
 > **macOS 専用**です。Windows / Linux はビルド定義上も対象外で、サポートしていません。
 
-![UI](docs/screenshot.png)
+![UI](docs/images/overview.png)
 
 ## 機能
 
