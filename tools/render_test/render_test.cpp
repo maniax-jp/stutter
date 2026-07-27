@@ -32,6 +32,10 @@
 #include "dsp/effects/GateEffect.h"
 #include "dsp/effects/FilterEffect.h"
 #include "dsp/effects/CrushEffect.h"
+#include "dsp/effects/StretcherEffect.h"
+#include "dsp/effects/ShufflerEffect.h"
+#include "dsp/effects/DelayEffect.h"
+#include "dsp/effects/DistortionEffect.h"
 #include "dsp/BlockSequencer.h"
 #include "dsp/GestureEngine.h"
 #include "dsp/ModulationEngine.h"
@@ -1985,6 +1989,147 @@ bool testSceneDocument()
     return ok;
 }
 
+// (l) The four v2 effects, with determinism as the headline property.
+//
+// Shuffler and Stretcher randomise. If either reached for a global RNG the output would
+// depend on how the host chunked the buffer, so the same project would render differently at
+// a different buffer size and an offline bounce would not match what was heard. The
+// block-size invariance check below is the one that catches that specifically -- a
+// same-seed-twice check alone would pass even with a global generator, as long as both runs
+// used the same chunking.
+bool testNewEffects()
+{
+    printf ("\n[Test L] v2 effects: Stretcher, Shuffler, Delay, Distortion\n");
+
+    using namespace stutter;
+    bool ok = true;
+    auto check = [&ok] (const char* what, bool cond)
+    {
+        if (! cond) { printf ("  FAIL: %s\n", what); ok = false; }
+    };
+
+    auto makeEffect = [] (int lane) -> std::unique_ptr<LaneEffect>
+    {
+        switch (lane)
+        {
+            case StutterAudioProcessor::laneStretcher: return std::make_unique<StretcherEffect>();
+            case StutterAudioProcessor::laneShuffler:  return std::make_unique<ShufflerEffect>();
+            case StutterAudioProcessor::laneDelay:     return std::make_unique<DelayEffect>();
+            default:                                   return std::make_unique<DistortionEffect>();
+        }
+    };
+
+    struct LaneCase { int lane; const char* name; };
+    const LaneCase cases[] = {
+        { StutterAudioProcessor::laneStretcher, "Stretcher" },
+        { StutterAudioProcessor::laneShuffler,  "Shuffler"  },
+        { StutterAudioProcessor::laneDelay,     "Delay"     },
+        { StutterAudioProcessor::laneDistort,   "Distort"   },
+    };
+
+    // Render one lane, at a chosen block size, with a chosen seed.
+    auto render = [&] (int lane, int blockSize, uint32_t seed)
+    {
+        CaptureBuffer cap; cap.prepare (kSampleRate, 2, 2.5);
+        BlockSequencer seq;
+        seq.setLaneEffect (lane, makeEffect (lane));
+        seq.prepare (kSampleRate, 2);
+        seq.setEnabled (true);
+
+        SceneSnapshot scene {};
+        scene.beats = 4; scene.divisions = 4; scene.seed = seed;
+        auto& laneSnap = scene.lanes[(size_t) lane];
+        laneSnap.blocks[0].startDiv = 0;
+        laneSnap.blocks[0].lengthDiv = 16;
+        laneSnap.numBlocks = 1;
+        if (auto* eff = seq.getLaneEffect (lane))
+        {
+            const auto set = eff->getParamDescriptors();
+            for (int i = 0; i < set.count && i < maxParamsPerLane; ++i)
+                laneSnap.params[(size_t) i] = set[i].defaultValue;
+        }
+        seq.updateChainOrder (scene);
+
+        const int preRoll = (int) kSampleRate;
+        const int total = preRoll + (int) (kSampleRate * 1.0);
+        juce::AudioBuffer<float> source (2, total);
+        fillTestSignal (source, kSampleRate, kBpm);
+
+        juce::AudioBuffer<float> out (2, total);
+        out.clear();
+
+        const double pps = (kBpm / 60.0) / kSampleRate;
+        double clock = 0.0;
+        for (int pos = 0; pos < total; pos += blockSize)
+        {
+            const int n = juce::jmin (blockSize, total - pos);
+            juce::AudioBuffer<float> blk (2, n);
+            for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
+            cap.write (blk);
+            // The scene is active throughout. Switching it mid-render would engage on
+            // whichever block boundary each chunk size happens to provide, which is a
+            // property of the harness rather than of the effect -- and it masks exactly the
+            // block-size dependence this test exists to detect.
+            seq.processBlock (blk, cap, scene, clock, pps);
+            clock += pps * (double) n;
+            for (int c = 0; c < 2; ++c) out.copyFrom (c, pos, blk, c, 0, n);
+        }
+        return out;
+    };
+
+    auto maxDiff = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+    {
+        double m = 0.0;
+        const int n = juce::jmin (a.getNumSamples(), b.getNumSamples());
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < n; ++i)
+                m = juce::jmax (m, std::abs ((double) a.getReadPointer (c)[i]
+                                             - (double) b.getReadPointer (c)[i]));
+        return m;
+    };
+
+    for (const auto& lc : cases)
+    {
+        const auto a = render (lc.lane, 512, 1234u);
+        const auto metrics = analyze (a, kClickThreshold, kDiscontinuityThreshold);
+
+        // Produces audio at all, and does not click.
+        const bool audible = metrics.rms > 0.001;
+        const bool clean = metrics.severeClickCount == 0;
+
+        // Same seed, same block size -> identical.
+        const auto b = render (lc.lane, 512, 1234u);
+        const bool repeatable = maxDiff (a, b) == 0.0;
+
+        // Same seed, DIFFERENT block size -> still identical. This is the check that a
+        // global RNG would fail.
+        const auto c = render (lc.lane, 128, 1234u);
+        const double blockDiff = maxDiff (a, c);
+        const bool blockInvariant = blockDiff == 0.0;
+
+        printf ("  %-10s rms=%.4f clicks=%d repeatable=%s blockInvariant=%s (diff %.9g)\n",
+                lc.name, metrics.rms, metrics.severeClickCount,
+                repeatable ? "yes" : "NO", blockInvariant ? "yes" : "NO", blockDiff);
+
+        if (! audible)        { printf ("    FAIL: %s produced no audio\n", lc.name); ok = false; }
+        if (! clean)          { printf ("    FAIL: %s clicks\n", lc.name); ok = false; }
+        if (! repeatable)     { printf ("    FAIL: %s is not repeatable\n", lc.name); ok = false; }
+        if (! blockInvariant) { printf ("    FAIL: %s depends on block size\n", lc.name); ok = false; }
+    }
+
+    // A different seed must actually change the seeded effects, or the seed is not wired up.
+    {
+        const auto s1 = render (StutterAudioProcessor::laneShuffler, 512, 1u);
+        const auto s2 = render (StutterAudioProcessor::laneShuffler, 512, 999u);
+        const double d = maxDiff (s1, s2);
+        printf ("  Shuffler seed 1 vs 999: maxDiff = %.6f\n", d);
+        check ("a different seed changes the Shuffler's choices", d > 0.001);
+    }
+
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -2125,8 +2270,9 @@ int main (int argc, char* argv[])
     const bool testIPass = testGestureEngine();
     const bool testJPass = testModulationEngine();
     const bool testKPass = testSceneDocument();
+    const bool testLPass = testNewEffects();
     if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
-        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass)
+        || ! testGPass || ! testHPass || ! testIPass || ! testJPass || ! testKPass || ! testLPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");

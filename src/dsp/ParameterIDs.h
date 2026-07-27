@@ -102,5 +102,12 @@ constexpr int repitch     = 4;
 constexpr int gate        = 5;
 constexpr int filter      = 6;
 constexpr int crush       = 7;
-constexpr int count       = 8;
+// v2 lanes (WP10). Only the block sequencer knows about these; the v1 grid has no
+// representation for them.
+constexpr int stretcher   = 8;
+constexpr int shuffler    = 9;
+constexpr int delay       = 10;
+constexpr int distort     = 11;
+constexpr int count       = 8;   // v1 lane count, still what StepSequencer iterates
+constexpr int countV2     = 12;
 } // namespace stutter::lanes

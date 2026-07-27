@@ -66,7 +66,7 @@ private:
         bool nearRightEdge = false;
     };
 
-    HitInfo hitTest (juce::Point<int> p) const;
+    HitInfo hitTestGrid (juce::Point<int> p) const;
 
     juce::Rectangle<int> getGridArea() const;
     juce::Rectangle<int> getLabelArea() const;

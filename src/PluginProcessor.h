@@ -81,6 +81,10 @@ public:
     static constexpr int laneGate      = stutter::lanes::gate;
     static constexpr int laneFilter    = stutter::lanes::filter;
     static constexpr int laneCrush     = stutter::lanes::crush;
+    static constexpr int laneStretcher = stutter::lanes::stretcher;
+    static constexpr int laneShuffler  = stutter::lanes::shuffler;
+    static constexpr int laneDelay     = stutter::lanes::delay;
+    static constexpr int laneDistort   = stutter::lanes::distort;
 private:
     void updateTransportAndSequence (juce::AudioBuffer<float>& buffer);
     void applyGlobalModulators (juce::AudioBuffer<float>& buffer);

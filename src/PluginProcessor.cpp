@@ -9,6 +9,10 @@
 #include "dsp/effects/GateEffect.h"
 #include "dsp/effects/FilterEffect.h"
 #include "dsp/effects/CrushEffect.h"
+#include "dsp/effects/StretcherEffect.h"
+#include "dsp/effects/ShufflerEffect.h"
+#include "dsp/effects/DelayEffect.h"
+#include "dsp/effects/DistortionEffect.h"
 
 #include "dsp/ParameterLayout.h"
 

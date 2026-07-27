@@ -61,7 +61,7 @@ juce::Rectangle<float> BlockGrid::getCellBounds (int lane, int division) const
              rowH - rowGap };
 }
 
-BlockGrid::HitInfo BlockGrid::hitTest (juce::Point<int> p) const
+BlockGrid::HitInfo BlockGrid::hitTestGrid (juce::Point<int> p) const
 {
     HitInfo info;
     const auto labelArea = getLabelArea();
@@ -119,7 +119,7 @@ BlockGrid::HitInfo BlockGrid::hitTest (juce::Point<int> p) const
 
 void BlockGrid::mouseMove (const juce::MouseEvent& e)
 {
-    const auto hit = hitTest (e.getPosition());
+    const auto hit = hitTestGrid (e.getPosition());
     if (hit.lane != hoverLane || hit.division != hoverDivision)
     {
         hoverLane = hit.lane;
@@ -137,7 +137,7 @@ void BlockGrid::mouseMove (const juce::MouseEvent& e)
 
 void BlockGrid::mouseDown (const juce::MouseEvent& e)
 {
-    const auto hit = hitTest (e.getPosition());
+    const auto hit = hitTestGrid (e.getPosition());
 
     if (hit.onLabel)
     {
@@ -193,7 +193,7 @@ void BlockGrid::mouseDrag (const juce::MouseEvent& e)
     if (dragMode == DragMode::None || dragLane < 0)
         return;
 
-    const auto hit = hitTest (e.getPosition());
+    const auto hit = hitTestGrid (e.getPosition());
     const int divs = juce::jmax (1, doc.totalDivisions (sceneIndex));
     const int div = juce::jlimit (0, divs - 1, hit.division >= 0 ? hit.division : dragAnchorDiv);
 
@@ -272,7 +272,7 @@ void BlockGrid::mouseUp (const juce::MouseEvent&)
 
 void BlockGrid::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    const auto hit = hitTest (e.getPosition());
+    const auto hit = hitTestGrid (e.getPosition());
     if (! hit.onGrid)
         return;
 
