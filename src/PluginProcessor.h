@@ -8,13 +8,16 @@
 #include "dsp/CurveModulator.h"
 #include "dsp/ParameterIDs.h"
 #include "PresetManager.h"
+#include "state/SceneStore.h"
+#include "state/LiveParamOverlay.h"
+#include "state/SceneSchema.h"
 
 namespace stutter
 {
 enum class ModTarget { Volume, Filter, Pan, Count };
 }
 
-class StutterAudioProcessor : public juce::AudioProcessor
+class StutterAudioProcessor : public juce::AudioProcessor, public juce::Timer
 {
 public:
     StutterAudioProcessor();
@@ -80,6 +83,9 @@ private:
     void applyGlobalModulators (juce::AudioBuffer<float>& buffer);
     void applyDryWetAndGain (const juce::AudioBuffer<float>& dryBuffer, juce::AudioBuffer<float>& wetBuffer);
 
+    void timerCallback() override;
+    void loadInitState();
+
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
         split into successive calls to this. */
@@ -104,6 +110,10 @@ private:
     // Constructed last (after apvts/sequencer/curves exist) since it reads them when building
     // factory preset states; declared last so member destruction order doesn't matter either way.
     std::unique_ptr<stutter::PresetManager> presetManager;
+
+    // v2 scene store and scalar param overlay
+    stutter::SceneStore sceneStore;
+    stutter::LiveParamOverlay paramOverlay;
 
     // Smoothed globals (audio-rate, click-free)
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> dryWetSmoothed;

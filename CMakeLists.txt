@@ -50,6 +50,8 @@ target_sources(Stutter
         src/ui/LaneParamPanel.cpp
         src/ui/CurveEditor.cpp
         src/ui/BottomTabs.cpp
+        src/state/SceneStore.cpp
+        src/state/SceneSchema.cpp
 )
 
 target_include_directories(Stutter

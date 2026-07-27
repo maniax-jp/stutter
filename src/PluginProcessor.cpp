@@ -33,6 +33,7 @@ StutterAudioProcessor::StutterAudioProcessor()
     sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
 
     presetManager = std::make_unique<stutter::PresetManager> (*this);
+    startTimerHz (2);
 }
 
 StutterAudioProcessor::~StutterAudioProcessor() = default;
@@ -402,6 +403,9 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
 
+    // Write v2 schema version so setStateInformation can distinguish from v1 state.
+    state.setProperty (stutter::SceneIDs::version, stutter::stateSchemaVersion, nullptr);
+
     // Attach structural (non-parameter) data: step grid + curves
     state.removeChild (state.getChildWithName (ID::sequencerNode), nullptr);
     state.removeChild (state.getChildWithName (ID::curvesNode), nullptr);
@@ -432,6 +436,25 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
     if (! newState.isValid())
         return;
 
+    // Version guard: v1 state has no version property, so getProperty yields 1.
+    // Reject older state rather than half-applying an incompatible tree.
+    const int version = (int) newState.getProperty (stutter::SceneIDs::version, 1);
+    if (version < stutter::stateSchemaVersion)
+    {
+        loadInitState();
+        return;
+    }
+
+    auto scenesNode = newState.getChildWithName (stutter::SceneIDs::scenesNode);
+
+    if (scenesNode.isValid())
+    {
+        // v2 state with <Scenes> node: feed to SceneStore.
+        sceneStore.rebuildFromTree (scenesNode);
+    }
+
+    // Fall back to existing v1 loading path (this build still uses StepSequencer and
+    // the v1 Sequencer/Curves nodes; WP3 replaces that).
     auto sequencerTree = newState.getChildWithName (ID::sequencerNode);
     auto curvesTree = newState.getChildWithName (ID::curvesNode);
 
@@ -469,6 +492,28 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
         }
         curves[i].fromValueTree (matchedCurve);
     }
+}
+
+void StutterAudioProcessor::timerCallback()
+{
+    sceneStore.collectGarbage();
+}
+
+void StutterAudioProcessor::loadInitState()
+{
+    // Reset every parameter to the value declared in the layout, then clear the structural
+    // data. Copying the state and replacing it with itself would be a no-op -- the
+    // parameters have to be driven back to their defaults explicitly, or a rejected load
+    // would leave whatever the user last had dialled in.
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            ranged->setValueNotifyingHost (ranged->getDefaultValue());
+
+    sequencer.fromValueTree (juce::ValueTree {});
+    // An invalid tree makes each curve fall back to its own neutral value (see
+    // ID::neutralValueForCurve) -- the same path Test C exercises for malformed state.
+    for (size_t i = 0; i < curves.size(); ++i)
+        curves[i].fromValueTree (juce::ValueTree {});
 }
 
 //==============================================================================

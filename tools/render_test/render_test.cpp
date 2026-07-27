@@ -26,6 +26,9 @@
 #include "dsp/TimingMode.h"
 #include "dsp/effects/StutterEffect.h"
 #include "dsp/effects/ReverseEffect.h"
+#include "state/SceneSchema.h"
+#include "state/SceneSnapshot.h"
+#include "state/SceneStore.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -732,6 +735,276 @@ bool testRateLabelsMatchActualDurations()
     return ok;
 }
 
+// (g) v2 scene schema: parsing, clamping, the block ordering invariant, curve baking, and
+// the SceneStore publish/retire lifecycle.
+//
+// The block ordering check is the load-bearing one: BlockSequencer will advance a
+// forward-only cursor through each lane's blocks, so an unsorted or overlapping array
+// silently breaks playback in a way that is hard to trace back here. sceneFromTree is the
+// only place that invariant is established.
+bool testSceneSchemaAndStore()
+{
+    printf ("\n[Test G] v2 scene schema, block ordering, and store lifecycle\n");
+
+    using namespace stutter;
+    bool ok = true;
+    auto check = [&ok] (const char* what, bool cond)
+    {
+        if (! cond) { printf ("  FAIL: %s\n", what); ok = false; }
+    };
+
+    // ---- G1: malformed input yields a usable scene, never garbage --------------------
+    {
+        juce::ValueTree empty (SceneIDs::scene);
+        const auto s = SceneSchema::sceneFromTree (empty);
+        check ("empty scene gets default geometry",
+               s.beats == 4 && s.divisions == 4 && s.populated);
+
+        juce::ValueTree wild (SceneIDs::scene);
+        wild.setProperty (SceneIDs::beats, 999, nullptr);
+        wild.setProperty (SceneIDs::divisions, -5, nullptr);
+        wild.setProperty (SceneIDs::swing, 17.0f, nullptr);
+        wild.setProperty (SceneIDs::loopPolicy, 42, nullptr);
+        wild.setProperty (SceneIDs::releaseMode, -3, nullptr);
+        const auto w = SceneSchema::sceneFromTree (wild);
+        check ("out-of-range beats clamps to 1..8", w.beats >= 1 && w.beats <= 8);
+        check ("out-of-range divisions clamps to 2..8", w.divisions >= 2 && w.divisions <= 8);
+        check ("out-of-range swing clamps to -1..1", w.swing >= -1.0f && w.swing <= 1.0f);
+        check ("invalid loopPolicy falls back to a valid enum",
+               (int) w.loopPolicy >= 0 && (int) w.loopPolicy <= 2);
+        check ("invalid releaseMode falls back to a valid enum",
+               (int) w.releaseMode >= 0 && (int) w.releaseMode <= 4);
+
+        // A lane index far outside the array must not write past the end.
+        juce::ValueTree badLaneScene (SceneIDs::scene);
+        juce::ValueTree laneParams (SceneIDs::laneParams);
+        juce::ValueTree badLane (SceneIDs::lane);
+        badLane.setProperty (SceneIDs::index, 999, nullptr);
+        laneParams.appendChild (badLane, nullptr);
+        badLaneScene.appendChild (laneParams, nullptr);
+        const auto bl = SceneSchema::sceneFromTree (badLaneScene);
+        check ("out-of-range lane index is ignored, not written", bl.populated);
+
+        // An out-of-range curve target must be rejected rather than indexing the mod array.
+        juce::ValueTree curveScene (SceneIDs::scene);
+        juce::ValueTree curvesNode (SceneIDs::curvesNode);
+        juce::ValueTree badCurve (SceneIDs::curve);
+        badCurve.setProperty (SceneIDs::target, 99999, nullptr);
+        badCurve.setProperty (SceneIDs::enabled, true, nullptr);
+        curvesNode.appendChild (badCurve, nullptr);
+        curveScene.appendChild (curvesNode, nullptr);
+        const auto cs = SceneSchema::sceneFromTree (curveScene);
+        check ("invalid curve target is rejected",
+               cs.curves[0].targetParam == -1 || isValidParamIndex (cs.curves[0].targetParam));
+        check ("invalid-target curve is not counted as an active route",
+               cs.numActiveCurves == 0);
+    }
+
+    // ---- G2: blocks come out sorted and non-overlapping -------------------------------
+    {
+        juce::ValueTree sceneTree (SceneIDs::scene);
+        sceneTree.setProperty (SceneIDs::beats, 4, nullptr);
+        sceneTree.setProperty (SceneIDs::divisions, 4, nullptr);
+        juce::ValueTree blocks (SceneIDs::blocksNode);
+
+        // Deliberately out of order, with an overlap and a negative length.
+        auto addBlock = [&blocks] (int lane, int start, int len)
+        {
+            juce::ValueTree b (SceneIDs::block);
+            b.setProperty (SceneIDs::laneRef, lane, nullptr);
+            b.setProperty (SceneIDs::start, start, nullptr);
+            b.setProperty (SceneIDs::length, len, nullptr);
+            blocks.appendChild (b, nullptr);
+        };
+        addBlock (0, 12, 2);
+        addBlock (0, 0, 4);
+        addBlock (0, 2, 4);    // overlaps the previous block
+        addBlock (0, 8, 2);
+        addBlock (0, 5, -3);   // nonsense length
+        sceneTree.appendChild (blocks, nullptr);
+
+        const auto s = SceneSchema::sceneFromTree (sceneTree);
+        const auto& lane0 = s.lanes[0];
+
+        bool sorted = true, disjoint = true, sane = true;
+        for (int i = 0; i < lane0.numBlocks; ++i)
+        {
+            const auto& blk = lane0.blocks[(size_t) i];
+            if (blk.lengthDiv <= 0)
+                sane = false;
+            if (blk.startDiv < 0 || blk.endDiv() > s.totalDivisions())
+                sane = false;
+            if (i > 0)
+            {
+                const auto& prev = lane0.blocks[(size_t) i - 1];
+                if (blk.startDiv < prev.startDiv)
+                    sorted = false;
+                if (blk.startDiv < prev.endDiv())
+                    disjoint = false;
+            }
+        }
+        check ("blocks are sorted by startDiv", sorted);
+        check ("blocks do not overlap", disjoint);
+        check ("blocks have positive length and stay in range", sane);
+        check ("at least the valid blocks survived", lane0.numBlocks >= 2);
+    }
+
+    // ---- G3: curve baking, including the anti-click weights ---------------------------
+    {
+        auto maxAdjacentJump = [] (const float* t, int n)
+        {
+            float m = 0.0f;
+            for (int i = 1; i < n; ++i)
+                m = juce::jmax (m, std::abs (t[(size_t) i] - t[(size_t) i - 1]));
+            return m;
+        };
+
+        // A hard step: two points at nearly the same position. This is the shape the point
+        // weights exist to tame.
+        auto stepPoints = [] (PointWeight w)
+        {
+            return std::vector<CurvePointV2> {
+                { 0.0f,    0.0f, 0.0f, w },
+                { 0.5f,    0.0f, 0.0f, w },
+                { 0.5001f, 1.0f, 0.0f, w },
+                { 1.0f,    1.0f, 0.0f, w }
+            };
+        };
+
+        std::vector<float> table ((size_t) CurveSnapshot::tableSize);
+        SceneSchema::bakeCurveTable (stepPoints (PointWeight::Hard), table.data(), CurveSnapshot::tableSize);
+        const float hardJump = maxAdjacentJump (table.data(), CurveSnapshot::tableSize);
+        SceneSchema::bakeCurveTable (stepPoints (PointWeight::Medium), table.data(), CurveSnapshot::tableSize);
+        const float mediumJump = maxAdjacentJump (table.data(), CurveSnapshot::tableSize);
+        SceneSchema::bakeCurveTable (stepPoints (PointWeight::Soft), table.data(), CurveSnapshot::tableSize);
+        const float softJump = maxAdjacentJump (table.data(), CurveSnapshot::tableSize);
+
+        printf ("  step max adjacent jump: Hard=%.4f Medium=%.4f Soft=%.4f\n",
+                hardJump, mediumJump, softJump);
+
+        // The weights are an anti-click mechanism; if Medium and Soft do not actually reduce
+        // the discontinuity they are decorative. Soft must be the smoothest of the three.
+        check ("Medium reduces the step discontinuity", mediumJump < hardJump * 0.5f);
+        check ("Soft reduces the step discontinuity", softJump < hardJump * 0.5f);
+        check ("Soft is at least as smooth as Medium", softJump <= mediumJump + 1.0e-4f);
+
+        // Smoothing must not destroy an ordinary shape: a linear ramp should still span
+        // its endpoints closely.
+        const std::vector<CurvePointV2> ramp {
+            { 0.0f, 0.0f, 0.0f, PointWeight::Soft },
+            { 1.0f, 1.0f, 0.0f, PointWeight::Soft }
+        };
+        SceneSchema::bakeCurveTable (ramp, table.data(), CurveSnapshot::tableSize);
+        check ("Soft leaves a plain ramp near its endpoints",
+               table[0] < 0.05f && table[(size_t) CurveSnapshot::tableSize - 1] > 0.95f);
+
+        // Degenerate input must not read out of bounds or produce NaN.
+        SceneSchema::bakeCurveTable ({}, table.data(), CurveSnapshot::tableSize);
+        bool finite = true;
+        for (int i = 0; i < CurveSnapshot::tableSize; ++i)
+            if (! std::isfinite (table[(size_t) i])) finite = false;
+        check ("empty point list bakes to a finite table", finite);
+
+        const std::vector<CurvePointV2> single { { 0.3f, 0.7f, 0.0f, PointWeight::Hard } };
+        SceneSchema::bakeCurveTable (single, table.data(), CurveSnapshot::tableSize);
+        check ("single point bakes to that flat value",
+               std::abs (table[0] - 0.7f) < 1.0e-4f
+               && std::abs (table[(size_t) CurveSnapshot::tableSize / 2] - 0.7f) < 1.0e-4f);
+    }
+
+    // ---- G4: tier resolution ----------------------------------------------------------
+    {
+        const auto locked = SceneSchema::pointsForTier (0, 0.42f, 0.0f, 1.0f, false);
+        check ("Locked tier yields a flat pair",
+               locked.size() == 2
+               && std::abs (locked[0].value - 0.42f) < 1.0e-6f
+               && std::abs (locked[1].value - 0.42f) < 1.0e-6f);
+
+        const auto split = SceneSchema::pointsForTier (1, 0.0f, 0.2f, 0.9f, false);
+        check ("Split tier ramps low to high",
+               split.size() == 2 && split[0].value < split[1].value);
+
+        const auto reversed = SceneSchema::pointsForTier (1, 0.0f, 0.2f, 0.9f, true);
+        check ("Split tier reverses on request",
+               reversed.size() == 2 && reversed[0].value > reversed[1].value);
+
+        check ("Custom tier defers to stored points",
+               SceneSchema::pointsForTier (2, 0.0f, 0.0f, 1.0f, false).empty());
+    }
+
+    // ---- G5: store publish / retire lifecycle -----------------------------------------
+    {
+        SceneStore store;
+        check ("empty store reads as nullptr", store.get (0) == nullptr);
+
+        auto bank = SceneStore::createBank();
+        bank->scenes[5].populated = true;
+        bank->scenes[5].beats = 7;
+        store.publish (std::move (bank));
+
+        const auto* s = store.get (5);
+        check ("published scene is readable", s != nullptr && s->beats == 7);
+        check ("index beyond the bank is nullptr", store.get (maxScenes) == nullptr);
+        check ("negative index is nullptr", store.get (-1) == nullptr);
+        check ("nothing retired after the first publish", store.getPendingRetireCount() == 0);
+
+        auto bank2 = SceneStore::createBank();
+        bank2->scenes[5].populated = true;
+        bank2->scenes[5].beats = 3;
+        store.publish (std::move (bank2));
+
+        check ("republish is visible immediately", store.get (5)->beats == 3);
+        check ("the replaced bank is retired, not freed", store.getPendingRetireCount() == 1);
+
+        // Inside the grace window the bank must survive: freeing it early is exactly the
+        // use-after-free the retire queue exists to prevent.
+        store.collectGarbage();
+        check ("collectGarbage keeps banks inside the grace window",
+               store.getPendingRetireCount() == 1);
+    }
+
+    // ---- G6: the v1 state guard actually rejects v1 state -----------------------------
+    //
+    // v2 drops v1 compatibility deliberately, so the guard is the only thing standing
+    // between an old session file and a half-applied, incoherent state. A guard that
+    // silently lets v1 through would be worse than none, because the failure would surface
+    // later as inexplicable parameter values.
+    {
+        StutterAudioProcessor proc;
+        proc.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+        proc.prepareToPlay (kSampleRate, kBlockSize);
+
+        auto& apvts = proc.getAPVTS();
+        auto* dryWetParam = apvts.getParameter (ID::dryWet);
+        const float defaultDryWet = apvts.getRawParameterValue (ID::dryWet)->load();
+
+        // Build a v1-shaped state: the APVTS tree carrying a deliberately non-default value
+        // and, crucially, no version property.
+        dryWetParam->setValueNotifyingHost (0.123f);
+        auto v1State = apvts.copyState();
+        v1State.removeProperty (SceneIDs::version, nullptr);
+        const float smuggledValue = apvts.getRawParameterValue (ID::dryWet)->load();
+
+        std::unique_ptr<juce::XmlElement> xml (v1State.createXml());
+        juce::MemoryBlock block;
+        proc.copyXmlToBinary (*xml, block);
+
+        // Move the live value away from the smuggled one so "rejected" is distinguishable
+        // from "coincidentally already equal".
+        dryWetParam->setValueNotifyingHost (1.0f);
+
+        proc.setStateInformation (block.getData(), (int) block.getSize());
+        const float afterLoad = apvts.getRawParameterValue (ID::dryWet)->load();
+
+        check ("v1-shaped state (no version property) is not applied",
+               std::abs (afterLoad - smuggledValue) > 1.0e-4f);
+        juce::ignoreUnused (defaultDryWet);
+    }
+
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -867,7 +1140,9 @@ int main (int argc, char* argv[])
     const bool testDPass = testSequencerOffBypassesStepsButCurvesStillWork();
     const bool testEPass = testApvtsInternalBpmChangesFreeRunSpeed();
     const bool testFPass = testRateLabelsMatchActualDurations();
-    if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass)
+    const bool testGPass = testSceneSchemaAndStore();
+    if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
+        || ! testGPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");

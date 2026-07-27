@@ -16,6 +16,8 @@ add_executable(render_test
     ${CMAKE_SOURCE_DIR}/src/ui/LaneParamPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/CurveEditor.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/BottomTabs.cpp
+    ${CMAKE_SOURCE_DIR}/src/state/SceneStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/state/SceneSchema.cpp
 )
 
 target_include_directories(render_test
