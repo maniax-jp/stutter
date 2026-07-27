@@ -11,6 +11,7 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
       processorRef (p),
       headerBar (p),
       sceneBrowser (p, p.getSceneDocument()),
+      performanceBar (p, p.getSceneDocument()),
       blockGrid (p, p.getSceneDocument()),
       bottomTabs (p)
 {
@@ -18,6 +19,7 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
 
     addAndMakeVisible (headerBar);
     addAndMakeVisible (sceneBrowser);
+    addAndMakeVisible (performanceBar);
     addAndMakeVisible (blockGrid);
     addAndMakeVisible (bottomTabs);
 
@@ -29,9 +31,11 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     {
         blockGrid.setSceneIndex (sceneIndex);
         bottomTabs.setSceneIndex (sceneIndex);
+        performanceBar.setSceneIndex (sceneIndex);
     };
     blockGrid.setSceneIndex (sceneBrowser.getSelectedScene());
     bottomTabs.setSceneIndex (sceneBrowser.getSelectedScene());
+    performanceBar.setSceneIndex (sceneBrowser.getSelectedScene());
     bottomTabs.setSelectedLane (blockGrid.getSelectedLane());
 
     // Structural preset data (step grid + curve breakpoints) isn't APVTS-parameter-bound, so it
@@ -43,6 +47,12 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
         blockGrid.repaint();
         sceneBrowser.repaint();
         bottomTabs.refreshAfterPresetLoad();
+
+        // A preset carries Play Mode / Scene Lock / quantize and each scene's Release mode, so
+        // these have to be re-read rather than repainted -- combo boxes show their own state,
+        // not the model's.
+        performanceBar.setSceneIndex (sceneBrowser.getSelectedScene());
+        performanceBar.refresh();
     };
 
     setResizable (true, true);
@@ -76,6 +86,7 @@ void StutterAudioProcessorEditor::resized()
 
     headerBar.setBounds (r.removeFromTop ((int) (72.0f * scale)));
     sceneBrowser.setBounds (r.removeFromTop ((int) (56.0f * scale)));
+    performanceBar.setBounds (r.removeFromTop ((int) (30.0f * scale)));
 
     auto bottomHeight = (int) (220.0f * scale);
     bottomTabs.setBounds (r.removeFromBottom (bottomHeight));

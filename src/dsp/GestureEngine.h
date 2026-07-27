@@ -77,6 +77,7 @@ public:
 
     /** Quantize grid in quarter notes; 0 disables. */
     void setTriggerQuantize (double ppq) noexcept { quantizePpq.store (ppq, std::memory_order_relaxed); }
+    double getTriggerQuantize() const noexcept { return quantizePpq.load (std::memory_order_relaxed); }
 
     /** Note -> scene index, or -1 for an unmapped key. Written by the message thread while
         the audio thread reads; entries are independent bytes with no cross-entry invariant,

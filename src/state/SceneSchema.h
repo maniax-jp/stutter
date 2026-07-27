@@ -11,9 +11,8 @@ namespace stutter
 
     Layout:
 
-        <StutterState version="2">
+        <StutterState version="2" activeScene sceneLock playMode triggerQuantize>
           <PARAMETERS>                 <!-- APVTS: globals + active-scene mirror -->
-          <Globals activeScene sceneLock playMode/>
           <Scenes>
             <Scene index name note seed beats divisions swing loopPolicy releaseMode>
               <LaneParams>
@@ -42,6 +41,9 @@ namespace SceneIDs
 {
     // Root and top-level nodes
     static const juce::Identifier stateRoot   { "StutterState" };
+    /** Unused. The globals it was meant to hold (activeScene, sceneLock, playMode,
+        triggerQuantize) are written as root properties instead, so nothing reads or writes a
+        <Globals> element -- kept only so a reader of old notes does not go looking for it. */
     static const juce::Identifier globalsNode { "Globals" };
     static const juce::Identifier scenesNode  { "Scenes" };
     static const juce::Identifier scene       { "Scene" };
@@ -69,6 +71,7 @@ namespace SceneIDs
     static const juce::Identifier activeScene { "activeScene" };
     static const juce::Identifier sceneLock   { "sceneLock" };
     static const juce::Identifier playMode    { "playMode" };
+    static const juce::Identifier triggerQuantize { "triggerQuantize" };
 
     // Scene geometry
     static const juce::Identifier beats       { "beats" };

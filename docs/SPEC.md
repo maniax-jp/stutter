@@ -176,6 +176,26 @@ continuous なものを latched にするとカーブを掛けても動かない
   編集できる
 - 複数ノート保持時は**最後の1つを離したときだけ**ジェスチャが終わる
 
+### これらがどこに保存されるか
+
+| 設定 | 格納先 | 理由 |
+|---|---|---|
+| Play Mode / Scene Lock / Quantize | state ツリーのルートプロパティ | セッション全体の設定であり、Scene ごとに変わるものではない |
+| Release モード | **Scene ごと** | 鍵盤ごとに離しかたを変えられることに意味がある(SE2 と同じ) |
+
+**いずれも APVTS パラメータにしていない。** これらは連続値ではなくモード切替であり、
+Play Mode をフレーズ途中でオートメーションされると「ノートが鳴るかどうか」自体が
+変わる。誰も要求していない挙動をホストが作り出せてしまうため、意図的に自動化対象から
+外している。
+
+そのため APVTS が運んでくれず、`getStateInformation` が明示的に書く必要がある。
+`loadInitState` でも明示的に Auto へ戻す — MIDI モードはノートが来るまで無音なので、
+前のパッチから引き継ぐと「プラグインが壊れている」ようにしか見えない。
+
+**ノート → Scene のマッピングは現状 identity 固定。** `setNoteMapping` は実装済みだが
+プロセッサは `setIdentityMapping()` しか呼んでおらず、任意の鍵盤に任意の Scene を
+割り当てる UI はまだない。
+
 ---
 
 ## State スキーマ(v2)
@@ -205,9 +225,8 @@ Scene 1個分だけをミラーする**。ホストがミラー層をオート�
 ### ツリー構造
 
 ```
-<StutterState version="2">
+<StutterState version="2" activeScene sceneLock playMode triggerQuantize>
   <PARAMETERS>                      APVTS: グローバル + アクティブSceneのミラー
-  <Globals activeScene sceneLock playMode/>
   <Scenes>
     <Scene index name note seed beats divisions swing loopPolicy releaseMode>
       <LaneParams>
@@ -230,6 +249,14 @@ Scene 1個分だけをミラーする**。ホストがミラー層をオート�
 - ブロックは `startDiv` 昇順・非重複であることが `SceneSchema` によって保証される。
   `BlockSequencer` は前進専用カーソルでこれに依存しているので、**この不変条件は
   `sceneFromTree` でのみ確立される**
+
+**プロパティ読み出しは必ず文字列も受け付けること。** `juce::ValueTree` の XML
+ラウンドトリップはプロパティを属性として書き、読み戻すと `var` は**文字列型**になる。
+`isInt()` だけを見る実装は、保存されたシーンの整数(lane / start / len / beats /
+divisions / tier / seed)を全てデフォルトへ戻してしまう。症状はパースエラーではなく
+「もっともらしい別のシーン」— 全ブロックが lane 0 に潰れ、重なった分が重複排除で
+消える — なので気付きにくい。`SceneSchema` の `getPropInt` / `getPropFloat` /
+`getPropBool` はこのために文字列を受ける。
 
 ### 2つのカーブ系統が併存している
 
@@ -255,8 +282,12 @@ v1 はパラメータ定義が3箇所(`ParameterIDs.h` の ID、`ParameterLayout
 |---|---|
 | ヘッダ | ロゴ、プリセットブラウザ、Dry/Wet、Output、SEQ/SYNC トグル、BPM |
 | Scene ストリップ | 鍵盤表示。どのノートに Scene があるか、どれが鳴っているか、どれを編集中か |
+| 演奏バー | Play Mode / Quantize / Release / Scene Lock |
 | ブロックグリッド | 12レーン × 可変 division。可変長ブロックの描画・編集、発光プレイヘッド |
 | 下部タブ | LANE(選択レーンのパラメータ)/ VOLUME / FILTER / PAN(カーブ)/ MOD(ルーティング表) |
+
+演奏バーがヘッダではなく鍵盤の直下にあるのは、これらが「ノートを弾いたときに何が
+起きるか」を決める設定であり、判断している最中にユーザーが見ているのが鍵盤だから。
 
 ### BlockGrid のマウス操作(Glitch 2 由来)
 
@@ -300,7 +331,28 @@ v1 はパラメータ定義が3箇所(`ParameterIDs.h` の ID、`ParameterLayout
 | Playable Set | C/D/E/F/G に強度順で配置、MIDI 演奏用 |
 
 **v1 プリセット**(`src/FactoryPresets.cpp`、29個)も残っており、`PresetManager` 経由で
-ロードできる。ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/*.xml`。
+ロードできる。ただし内容はロード時に v2 へ変換される: v1 の 16 ステップは
+beats=4 × divisions=4 と厳密に一致するため、`buildScenesTreeFromSteps` が丸めなしで
+ブロックへ再エンコードする(隣接する ON は1ブロックに統合)。**変換先は Scene 0 では
+なく Scene 60**。オーディオ側とエディタ側は独立に Scene を選ぶため、Scene 0 に書くと
+「音は正しいがグリッドは空」になり、ロード失敗にしか見えない。
+
+ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/*.xml`。
+
+**プリセットは必ず「音が変わること」をテストすること。** 以下は実際に全部同時に
+起きていた:
+
+- `buildFullStateTree` が `version` を書かず、全 29 プリセットがバージョンガードで
+  Init に差し替えられていた(ブラウザには名前が出るのに音は無変化)
+- `FactoryScenes` がプラグイン本体から未参照で、4バンクがユーザーから到達不能だった
+- バンクをロードしても Scene 0 に留まり、バンクは C4 以降にマップされているため無音
+- v1 の `stepsOn` が読まれない `<Sequencer>` ノードに入ったままで、28個中20個が無音
+
+構造(パースできる・ベイクできる)のテストは全て通っていた。**「選ぶと音が変わる」を
+誰も検証していなかった**ことが、これら全てを同時に見逃した単一の原因。テストハーネス
+自体にも3つの盲点があった: 1インスタンスで連続ロードすると前のバンクの Scene が
+生き残って無音プリセットが「音あり」と測定される / 定常サイン波は Buffer 系レーンが
+スライスを再生すると完全一致する / 1秒のレンダリングは16division中7までしか進まない。
 
 ---
 
@@ -309,7 +361,7 @@ v1 はパラメータ定義が3箇所(`ParameterIDs.h` の ID、`ParameterLayout
 ### 2つのターゲット
 
 - **`stutter_tests`**(Catch2、35ケース / 1310アサーション、`ctest` で0.27秒) — これがゲート。
-  19タグで絞り込める(`[modulation]` だけなら0.038秒)
+  24タグで絞り込める(`[modulation]` だけなら0.038秒)
 - **`render_test`**(311行) — 各レーンを WAV に書き出して人間が聴けるようにする。
   不連続性メトリクスも出力し、ゴールデンゲートがそれを比較する
 
@@ -373,8 +425,9 @@ tools/render_test/  WAV レンダリング用ハーネス
 
 ## 既知の制約
 
-- **v1 の state / プリセットは読まない**。バージョンガードで Init にフォールバックする
-  (意図的な判断)
+- **v1 の state は読まない**。バージョンガードで Init にフォールバックする(意図的な
+  判断)。v1 の**プリセット**は上記のとおり v2 のブロックへ変換してロードされる
+- **ノート → Scene マッピングは identity 固定**。`setNoteMapping` は実装済みだが UI がない
 - **レート表示の4倍ずれ**は v1.1.2 まで存在した。ラベル側を実態に合わせて修正済みで、
   プリセットの音は不変。`stutter::legacyRateIndexLabels()` が唯一の定義
 - **オーバーサンプリングなし**。Crush / Distortion / Repitch は高設定でエイリアスする。

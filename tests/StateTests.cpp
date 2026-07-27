@@ -514,3 +514,69 @@ TEST_CASE ("Factory modulation routes live on the scene the editor opens on", "[
     INFO ("the editor opens on scene " << ui::SceneBrowser::defaultScene);
     CHECK (onDefaultScene > 0);
 }
+
+TEST_CASE ("Performance settings survive a save/restore round-trip", "[state][roundtrip][gesture]")
+{
+    // Play Mode and Scene Lock are deliberately not APVTS parameters, so nothing else carries
+    // them across a session: if getStateInformation drops them, a project reopens in Auto and
+    // the user's MIDI setup is silently gone.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+
+    proc.getSceneDocument().replaceState (FactoryScenes::createBank (3));
+    proc.getGestureEngine().setPlayMode (PlayMode::Midi);
+    proc.getGestureEngine().setSceneLock (true);
+    proc.getGestureEngine().setTriggerQuantize (0.5);
+
+    juce::MemoryBlock saved;
+    proc.getStateInformation (saved);
+
+    StutterAudioProcessor restored;
+    restored.prepareToPlay (48000.0, 512);
+    restored.setStateInformation (saved.getData(), (int) saved.getSize());
+
+    CHECK (restored.getGestureEngine().getPlayMode() == PlayMode::Midi);
+    CHECK (restored.getGestureEngine().isSceneLocked());
+    CHECK_THAT (restored.getGestureEngine().getTriggerQuantize(), WithinAbs (0.5, 1.0e-9));
+}
+
+TEST_CASE ("Loading Init clears a leftover MIDI mode", "[state][gesture]")
+{
+    // MIDI mode is silent until a note arrives. Carrying it into an Init patch would look
+    // exactly like a broken plugin, so the fallback has to reset it.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+    proc.getGestureEngine().setPlayMode (PlayMode::Midi);
+    proc.getGestureEngine().setSceneLock (true);
+
+    // v1-shaped state (no version property) is rejected and falls back to Init.
+    juce::ValueTree legacy ("PARAMETERS");
+    std::unique_ptr<juce::XmlElement> xml (legacy.createXml());
+    juce::MemoryBlock block;
+    juce::AudioProcessor::copyXmlToBinary (*xml, block);
+    proc.setStateInformation (block.getData(), (int) block.getSize());
+
+    CHECK (proc.getGestureEngine().getPlayMode() == PlayMode::Auto);
+    CHECK_FALSE (proc.getGestureEngine().isSceneLocked());
+}
+
+TEST_CASE ("Release mode is stored per scene", "[state][gesture]")
+{
+    // The UI writes it to the scene rather than globally, so two keys can release differently.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+
+    auto& doc = proc.getSceneDocument();
+    auto a = doc.ensureScene (60);
+    auto b = doc.ensureScene (62);
+    a.setProperty (SceneIDs::releaseMode, (int) ReleaseMode::Latch, nullptr);
+    b.setProperty (SceneIDs::releaseMode, (int) ReleaseMode::Instant, nullptr);
+    doc.publish();
+
+    const auto* sa = proc.getSceneStore().get (60);
+    const auto* sb = proc.getSceneStore().get (62);
+    REQUIRE (sa != nullptr);
+    REQUIRE (sb != nullptr);
+    CHECK (sa->releaseMode == ReleaseMode::Latch);
+    CHECK (sb->releaseMode == ReleaseMode::Instant);
+}

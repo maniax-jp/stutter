@@ -50,6 +50,7 @@ target_sources(Stutter
         src/ui/BlockGrid.cpp
     src/ui/SceneBrowser.cpp
     src/ui/ModRoutePanel.cpp
+    src/ui/PerformanceBar.cpp
         src/ui/LaneParamPanel.cpp
         src/ui/CurveEditor.cpp
         src/ui/BottomTabs.cpp
@@ -109,6 +110,7 @@ if (STUTTER_BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/ui/BlockGrid.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/SceneBrowser.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/ModRoutePanel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/PerformanceBar.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/LaneParamPanel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/CurveEditor.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/BottomTabs.cpp

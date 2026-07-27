@@ -503,6 +503,16 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // scene happens to come first in the bank.
     state.setProperty (stutter::SceneIDs::activeScene, gestureEngine.getActiveScene(), nullptr);
 
+    // Performance settings. Not APVTS parameters: Play Mode and Scene Lock change what MIDI
+    // *means* rather than scaling a value, and a host automating them mid-phrase would make
+    // note handling unpredictable in a way no one would ask for.
+    state.setProperty (stutter::SceneIDs::playMode,
+                       (int) gestureEngine.getPlayMode(), nullptr);
+    state.setProperty (stutter::SceneIDs::sceneLock,
+                       gestureEngine.isSceneLocked(), nullptr);
+    state.setProperty (stutter::SceneIDs::triggerQuantize,
+                       gestureEngine.getTriggerQuantize(), nullptr);
+
 
     juce::ValueTree curvesTree (ID::curvesNode);
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
@@ -569,6 +579,19 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
         if (target >= 0)
             gestureEngine.setActiveScene (target);
+    }
+
+    // Performance settings. Read outside the scenes branch: a preset that carries no <Scenes>
+    // node still has to reset these, or a leftover MIDI mode from the previous patch would
+    // silence a freshly loaded one until the user found the control.
+    {
+        const int mode = (int) newState.getProperty (stutter::SceneIDs::playMode,
+                                                     (int) stutter::PlayMode::Auto);
+        gestureEngine.setPlayMode (mode == (int) stutter::PlayMode::Midi
+                                       ? stutter::PlayMode::Midi
+                                       : stutter::PlayMode::Auto);
+        gestureEngine.setSceneLock ((bool) newState.getProperty (stutter::SceneIDs::sceneLock, false));
+        gestureEngine.setTriggerQuantize ((double) newState.getProperty (stutter::SceneIDs::triggerQuantize, 0.0));
     }
 
     // The v1 Curves node is still read: the three global curve modulators
@@ -708,6 +731,12 @@ void StutterAudioProcessor::loadInitState()
         sceneDocument->ensureScene (0);
         sceneDocument->publish();
     }
+
+    // Performance settings back to defaults too. Leaving MIDI mode on would make an Init
+    // patch silent until a note arrived, which reads as the plugin being broken.
+    gestureEngine.setPlayMode (stutter::PlayMode::Auto);
+    gestureEngine.setSceneLock (false);
+    gestureEngine.setTriggerQuantize (0.0);
 }
 
 //==============================================================================

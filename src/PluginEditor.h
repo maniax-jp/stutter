@@ -6,6 +6,7 @@
 #include "ui/HeaderBar.h"
 #include "ui/BlockGrid.h"
 #include "ui/SceneBrowser.h"
+#include "ui/PerformanceBar.h"
 #include "ui/BottomTabs.h"
 
 /**
@@ -32,6 +33,7 @@ private:
 
     stutter::ui::HeaderBar headerBar;
     stutter::ui::SceneBrowser sceneBrowser;
+    stutter::ui::PerformanceBar performanceBar;
     stutter::ui::BlockGrid blockGrid;
     stutter::ui::BottomTabs bottomTabs;
 
