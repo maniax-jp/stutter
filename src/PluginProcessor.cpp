@@ -46,7 +46,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout StutterAudioProcessor::creat
 
 //==============================================================================
 const juce::String StutterAudioProcessor::getName() const { return JucePlugin_Name; }
-bool StutterAudioProcessor::acceptsMidi() const { return false; }
+bool StutterAudioProcessor::acceptsMidi() const { return true; }
 bool StutterAudioProcessor::producesMidi() const { return false; }
 bool StutterAudioProcessor::isMidiEffect() const { return false; }
 double StutterAudioProcessor::getTailLengthSeconds() const { return 0.0; }
@@ -60,6 +60,8 @@ void StutterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     captureBuffer.prepare (sampleRate, numCh, 2.5);
     sequencer.prepare (sampleRate, numCh);
+    gestureEngine.prepare (sampleRate);
+    gestureEngine.setIdentityMapping();
 
     dryWetSmoothed.reset (sampleRate, 0.02);
     outputGainSmoothed.reset (sampleRate, 0.02);
@@ -303,17 +305,26 @@ void StutterAudioProcessor::applyDryWetAndGain (const juce::AudioBuffer<float>& 
         const float mix = dryWetSmoothed.getNextValue();
         const float gain = outputGainSmoothed.getNextValue();
 
+        // The gesture gate collapses the WET signal toward dry rather than toward silence,
+        // and it is applied here rather than by muting the sequencer. Both choices matter:
+        // gating to dry means releasing a note leaves the source audible instead of dropping
+        // a hole in the track, and gating with a ramp on the mix means every transition is
+        // click-free by construction rather than by care. In Auto mode this sits at 1.0 and
+        // the expression below reduces to exactly what v1 computed.
+        const float gate = gestureEngine.nextGateGain();
+        const float effectiveMix = mix * gate;
+
         for (int c = 0; c < numCh; ++c)
         {
             const float dry = dryBuffer.getReadPointer (juce::jmin (c, dryBuffer.getNumChannels() - 1))[n];
             const float wet = wetBuffer.getReadPointer (c)[n];
-            const float mixed = dry + mix * (wet - dry);
+            const float mixed = dry + effectiveMix * (wet - dry);
             wetBuffer.getWritePointer (c)[n] = mixed * gain;
         }
     }
 }
 
-void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
+void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk, const juce::MidiBuffer& chunkMidi)
 {
     // Capture the (dry) input into the always-on ring buffer. This must happen per-chunk (not
     // once for the whole host block) because StepSequencer::processBlock() anchors its reads to
@@ -337,6 +348,15 @@ void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
 
     juce::AudioBuffer<float> dryView (dryScratchBuffer.getArrayOfWritePointers(), chunkChannels, chunkSamples);
 
+    // 0. Gesture layer. Runs BEFORE the sequencer so a note arriving in this chunk can change
+    //    the active scene before the chunk is rendered, rather than one chunk late.
+    {
+        const auto* scene = sceneStore.get (gestureEngine.getActiveScene());
+        gestureEngine.currentPatternBeats = scene != nullptr ? scene->beats : 4;
+        const auto releaseMode = scene != nullptr ? scene->releaseMode : stutter::ReleaseMode::OnGrid;
+        gestureEngine.processMidi (chunkMidi, chunkSamples, lastKnownPpq, lastPpqPerSample, releaseMode);
+    }
+
     // 1. Transport sync + step sequencer (lane effects read from captureBuffer, write into `chunk`)
     updateTransportAndSequence (chunk);
 
@@ -350,7 +370,6 @@ void StutterAudioProcessor::processChunk (juce::AudioBuffer<float>& chunk)
 void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    midiMessages.clear();
 
     // dryScratchMaxSamples is only set (non-zero) by prepareToPlay(); dryScratchBuffer is sized
     // from it, and processChunk()/the chunking loop below both assume it's a valid, non-zero
@@ -386,10 +405,23 @@ void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const int n = juce::jmin (chunkCapacity, numSamples - offset);
 
         juce::AudioBuffer<float> chunk (buffer.getArrayOfWritePointers(), numChannels, offset, n);
-        processChunk (chunk);
+
+        // Slice this chunk's MIDI, rebasing event offsets to the chunk. Without the rebase a
+        // note landing late in a large host block would appear at the same offset in every
+        // chunk, so quantization would compute the wrong target position.
+        juce::MidiBuffer chunkMidi;
+        for (const auto meta : midiMessages)
+            if (meta.samplePosition >= offset && meta.samplePosition < offset + n)
+                chunkMidi.addEvent (meta.getMessage(), meta.samplePosition - offset);
+
+        processChunk (chunk, chunkMidi);
 
         offset += n;
     }
+
+    // Consume the MIDI rather than forwarding it: this is an audio effect, and a host that
+    // received these notes back would double-trigger anything chained after it.
+    midiMessages.clear();
 }
 
 //==============================================================================

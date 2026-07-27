@@ -33,6 +33,7 @@
 #include "dsp/effects/FilterEffect.h"
 #include "dsp/effects/CrushEffect.h"
 #include "dsp/BlockSequencer.h"
+#include "dsp/GestureEngine.h"
 #include "state/SceneSchema.h"
 #include "state/SceneSnapshot.h"
 #include "state/SceneStore.h"
@@ -1320,6 +1321,261 @@ bool testBlockSequencerMatchesStepSequencer()
     return ok;
 }
 
+// (i) MIDI gesture layer: note->scene selection, the five release modes, early-trigger
+// quantization, Scene Lock, and -- most importantly -- that the gate is click-free.
+//
+// The gate is a ramp on the wet path rather than a mute on the sequencer, specifically so
+// that every transition is smooth by construction. That property is worth asserting: a
+// regression to a hard mute would be inaudible in a spectrum plot and obvious on a note-off.
+bool testGestureEngine()
+{
+    printf ("\n[Test I] MIDI gesture layer\n");
+
+    using namespace stutter;
+    bool ok = true;
+    auto check = [&ok] (const char* what, bool cond)
+    {
+        if (! cond) { printf ("  FAIL: %s\n", what); ok = false; }
+    };
+
+    const double ppqPerSample = (kBpm / 60.0) / kSampleRate;
+
+    auto noteOn = [] (int note, int offset)
+    {
+        juce::MidiBuffer b;
+        b.addEvent (juce::MidiMessage::noteOn (1, note, 1.0f), offset);
+        return b;
+    };
+    auto noteOff = [] (int note, int offset)
+    {
+        juce::MidiBuffer b;
+        b.addEvent (juce::MidiMessage::noteOff (1, note), offset);
+        return b;
+    };
+
+    // ---- I1: note selects a scene, and only in MIDI/unlocked conditions ----------------
+    {
+        GestureEngine g;
+        g.prepare (kSampleRate);
+        g.setIdentityMapping();
+        g.setPlayMode (PlayMode::Midi);
+
+        g.processMidi (noteOn (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        check ("note 60 selects scene 60", g.getActiveScene() == 60);
+        check ("a scene change is flagged for the APVTS mirror", g.consumePendingMirror() == 60);
+        check ("the mirror flag is consumed once", g.consumePendingMirror() == -1);
+
+        g.setSceneLock (true);
+        g.processMidi (noteOn (72, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        check ("Scene Lock refuses the selection", g.getActiveScene() == 60);
+
+        g.setSceneLock (false);
+        g.processMidi (noteOn (72, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        check ("unlocking restores selection", g.getActiveScene() == 72);
+    }
+
+    // ---- I2: the gate ramps, never steps ----------------------------------------------
+    {
+        GestureEngine g;
+        g.prepare (kSampleRate);
+        g.setIdentityMapping();
+        g.setPlayMode (PlayMode::Midi);
+
+        float maxStep = 0.0f;
+        float prev = g.getGateGain();
+
+        auto runSamples = [&] (int n)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                const float gain = g.nextGateGain();
+                maxStep = juce::jmax (maxStep, std::abs (gain - prev));
+                prev = gain;
+            }
+        };
+
+        g.processMidi (noteOn (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        runSamples (kBlockSize);
+        check ("gate opens on note-on", g.getGateGain() > 0.99f);
+
+        g.processMidi (noteOff (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        runSamples (kBlockSize);
+        check ("gate closes on note-off", g.getGateGain() < 0.01f);
+
+        // A 5ms ramp at 48k is 240 samples, so no single step may exceed ~1/240.
+        const float allowed = 1.0f / 200.0f;
+        printf ("  max per-sample gate step = %.6f (limit %.6f)\n", maxStep, allowed);
+        check ("gate never steps discontinuously", maxStep <= allowed);
+    }
+
+    // ---- I3: Auto mode ignores the gate ------------------------------------------------
+    {
+        GestureEngine g;
+        g.prepare (kSampleRate);
+        g.setIdentityMapping();
+        g.setPlayMode (PlayMode::Auto);
+
+        juce::MidiBuffer empty;
+        g.processMidi (empty, kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        for (int i = 0; i < kBlockSize; ++i) g.nextGateGain();
+        check ("Auto mode holds the gate open with no notes", g.getGateGain() > 0.99f);
+    }
+
+    // ---- I4: release modes ------------------------------------------------------------
+    {
+        // Latch: note-off must NOT close the gate.
+        GestureEngine g;
+        g.prepare (kSampleRate);
+        g.setIdentityMapping();
+        g.setPlayMode (PlayMode::Midi);
+        g.processMidi (noteOn (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Latch);
+        for (int i = 0; i < kBlockSize; ++i) g.nextGateGain();
+        g.processMidi (noteOff (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Latch);
+        for (int i = 0; i < kBlockSize; ++i) g.nextGateGain();
+        check ("Latch keeps the gate open through note-off", g.getGateGain() > 0.99f);
+
+        // OnGrid: the gate must stay open until the next grid boundary, then close.
+        GestureEngine g2;
+        g2.prepare (kSampleRate);
+        g2.setIdentityMapping();
+        g2.setPlayMode (PlayMode::Midi);
+        g2.setTriggerQuantize (1.0);   // one quarter note
+
+        double clock = 0.0;
+        g2.processMidi (noteOn (60, 0), kBlockSize, clock, ppqPerSample, ReleaseMode::OnGrid);
+        for (int i = 0; i < kBlockSize; ++i) g2.nextGateGain();
+        clock += ppqPerSample * kBlockSize;
+
+        // Release just after the boundary at ppq 0, so the next one is at ppq 1.0.
+        g2.processMidi (noteOff (60, 0), kBlockSize, clock, ppqPerSample, ReleaseMode::OnGrid);
+        for (int i = 0; i < kBlockSize; ++i) g2.nextGateGain();
+        clock += ppqPerSample * kBlockSize;
+        check ("OnGrid holds the gate until the boundary", g2.getGateGain() > 0.99f);
+
+        // Advance past ppq 1.0.
+        juce::MidiBuffer empty;
+        while (clock < 1.2)
+        {
+            g2.processMidi (empty, kBlockSize, clock, ppqPerSample, ReleaseMode::OnGrid);
+            for (int i = 0; i < kBlockSize; ++i) g2.nextGateGain();
+            clock += ppqPerSample * kBlockSize;
+        }
+        check ("OnGrid closes the gate after the boundary", g2.getGateGain() < 0.01f);
+    }
+
+    // ---- I5: quantization accepts an early note ----------------------------------------
+    {
+        GestureEngine g;
+        g.prepare (kSampleRate);
+        g.setIdentityMapping();
+        g.setPlayMode (PlayMode::Midi);
+        g.setTriggerQuantize (1.0);
+
+        // A note arriving at ppq 0.9 is aiming at the boundary at 1.0, not at 0.0. It must
+        // wait rather than fire late, which is what lets a player anticipate the beat.
+        g.processMidi (noteOn (64, 0), kBlockSize, 0.9, ppqPerSample, ReleaseMode::Instant);
+        check ("an early note does not fire immediately", g.getActiveScene() != 64);
+
+        double clock = 0.9;
+        juce::MidiBuffer empty;
+        for (int b = 0; b < 40 && g.getActiveScene() != 64; ++b)
+        {
+            g.processMidi (empty, kBlockSize, clock, ppqPerSample, ReleaseMode::Instant);
+            clock += ppqPerSample * kBlockSize;
+        }
+        check ("an early note fires on the boundary it was aiming at", g.getActiveScene() == 64);
+
+        // A note well past the boundary is late and should fire at once rather than waiting
+        // an entire grid unit.
+        GestureEngine g2;
+        g2.prepare (kSampleRate);
+        g2.setIdentityMapping();
+        g2.setPlayMode (PlayMode::Midi);
+        g2.setTriggerQuantize (1.0);
+        g2.processMidi (noteOn (67, 0), kBlockSize, 2.1, ppqPerSample, ReleaseMode::Instant);
+        check ("a late note fires immediately", g2.getActiveScene() == 67);
+    }
+
+    // ---- I6: polyphonic release ---------------------------------------------------------
+    {
+        GestureEngine g;
+        g.prepare (kSampleRate);
+        g.setIdentityMapping();
+        g.setPlayMode (PlayMode::Midi);
+
+        g.processMidi (noteOn (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        g.processMidi (noteOn (64, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        for (int i = 0; i < kBlockSize; ++i) g.nextGateGain();
+
+        g.processMidi (noteOff (60, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        for (int i = 0; i < kBlockSize; ++i) g.nextGateGain();
+        check ("releasing one of two held notes keeps the gate open", g.getGateGain() > 0.99f);
+
+        g.processMidi (noteOff (64, 0), kBlockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
+        for (int i = 0; i < kBlockSize; ++i) g.nextGateGain();
+        check ("releasing the last note closes the gate", g.getGateGain() < 0.01f);
+    }
+
+    // ---- I7: MIDI actually reaches the processor -------------------------------------
+    //
+    // Every check above exercises GestureEngine in isolation. This one drives the whole
+    // plugin, because the wiring between processBlock and the engine is its own failure
+    // surface: acceptsMidi(), the per-chunk MIDI slice, and the gate's position in the mix
+    // are all things that can be individually correct and collectively broken.
+    {
+        StutterAudioProcessor proc;
+        proc.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+        proc.prepareToPlay (kSampleRate, kBlockSize);
+
+        check ("processor advertises MIDI input", proc.acceptsMidi());
+
+        auto& engine = proc.getGestureEngine();
+        engine.setPlayMode (PlayMode::Midi);
+
+        juce::AudioBuffer<float> block (2, kBlockSize);
+        juce::MidiBuffer midi;
+
+        auto renderBlock = [&] (const juce::MidiBuffer& m) -> double
+        {
+            block.clear();
+            for (int c = 0; c < 2; ++c)
+            {
+                auto* d = block.getWritePointer (c);
+                for (int i = 0; i < kBlockSize; ++i)
+                    d[i] = 0.5f;   // DC, so the gate's effect is unambiguous
+            }
+            juce::MidiBuffer copy (m);
+            proc.processBlock (block, copy);
+            return rmsOf (block);
+        };
+
+        // With no note held in MIDI mode the wet path is gated shut, so the output is the
+        // dry signal -- not silence. Gating to dry rather than to nothing is deliberate:
+        // releasing a note should not punch a hole in the track.
+        const double idleRms = renderBlock (juce::MidiBuffer {});
+
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, 1.0f), 0);
+        renderBlock (midi);                    // gate ramps up during this block
+        const double heldRms = renderBlock (juce::MidiBuffer {});
+
+        check ("idle output is present (gated to dry, not silenced)", idleRms > 0.1);
+        check ("a held note keeps the output live", heldRms > 0.1);
+        check ("the note selected its scene through the processor",
+               engine.getActiveScene() == 60);
+
+        // MIDI must be consumed, not passed through: this is an audio effect, not a MIDI FX.
+        juce::MidiBuffer passthrough;
+        passthrough.addEvent (juce::MidiMessage::noteOn (1, 64, 1.0f), 0);
+        block.clear();
+        proc.processBlock (block, passthrough);
+        check ("MIDI is consumed rather than passed through", passthrough.isEmpty());
+    }
+
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -1457,8 +1713,9 @@ int main (int argc, char* argv[])
     const bool testFPass = testRateLabelsMatchActualDurations();
     const bool testGPass = testSceneSchemaAndStore();
     const bool testHPass = testBlockSequencerMatchesStepSequencer();
+    const bool testIPass = testGestureEngine();
     if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass
-        || ! testGPass || ! testHPass)
+        || ! testGPass || ! testHPass || ! testIPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");

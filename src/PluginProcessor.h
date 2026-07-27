@@ -6,6 +6,7 @@
 #include "dsp/CaptureBuffer.h"
 #include "dsp/StepSequencer.h"
 #include "dsp/CurveModulator.h"
+#include "dsp/GestureEngine.h"
 #include "dsp/ParameterIDs.h"
 #include "PresetManager.h"
 #include "state/SceneStore.h"
@@ -89,7 +90,7 @@ private:
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
         split into successive calls to this. */
-    void processChunk (juce::AudioBuffer<float>& chunk);
+    void processChunk (juce::AudioBuffer<float>& chunk, const juce::MidiBuffer& chunkMidi);
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -112,8 +113,18 @@ private:
     std::unique_ptr<stutter::PresetManager> presetManager;
 
     // v2 scene store and scalar param overlay
+public:
+    /** The MIDI gesture layer. Exposed so the editor can drive Play Mode / Scene Lock and so
+        the offline harness can verify note handling end to end. */
+    stutter::GestureEngine& getGestureEngine() noexcept { return gestureEngine; }
+
+private:
     stutter::SceneStore sceneStore;
     stutter::LiveParamOverlay paramOverlay;
+
+    // Consumes MIDI and produces the wet-path gate. Sits ahead of the sequencer in
+    // processChunk so a note can change the active scene before that chunk is rendered.
+    stutter::GestureEngine gestureEngine;
 
     // Smoothed globals (audio-rate, click-free)
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> dryWetSmoothed;
