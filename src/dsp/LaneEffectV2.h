@@ -143,6 +143,13 @@ struct BlockContext
         from silence. Effects use it to arm RetriggerSmoother: a fresh start is masked by the
         sequencer's own gain ramp, a retrigger is not. */
     bool isRetrigger = false;
+
+    /** The triggering block's modulation tier (0 Locked, 1 Split, 2 Custom). Effects do not
+        branch on this -- the tier is already resolved into a baked curve before the audio
+        thread sees anything, which is what makes the three tiers cost the same. It is
+        carried here only so an effect can expose tier-dependent *display* state; treat it as
+        informational. */
+    juce::uint8 tier = 0;
 };
 
 /**
