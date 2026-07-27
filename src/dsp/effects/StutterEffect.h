@@ -19,13 +19,11 @@ public:
 
     ParamDescriptorSet getParamDescriptors() const noexcept override
     {
-        static constexpr const char* rateChoices[] = {
-            "1/4", "1/8", "1/16", "1/32", "1/64",
-            "1/4T", "1/8T", "1/16T",
-            "1/4.", "1/8.", "1/16."
-        };
-        static constexpr ParamDescriptor descs[] = {
-            { "rate",       "Stutter Rate",        0.0f, 10.0f,  2.0f, 0.0f, 1.0f, "",  rateChoices, 11, true,  true },
+        // Labels come from TimingMode.h so they cannot drift from the fractions they name
+        // (they did in v1: every rate displayed four times longer than it sounded).
+        static const char* const* rateChoices = legacyRateIndexLabels();
+        static const ParamDescriptor descs[] = {
+            { "rate",       "Stutter Rate",        0.0f, 10.0f,  2.0f, 0.0f, 1.0f, "",  rateChoices, numLegacyRateIndices, true,  true },
             { "decay",      "Stutter Decay",       0.0f,  1.0f,  0.0f, 0.0f, 1.0f, "",  nullptr,     0,  true,  true },
             { "pitchSlide", "Stutter Pitch Slide", -24.0f, 24.0f, 0.0f, 0.0f, 1.0f, "st", nullptr,   0,  true,  true },
         };

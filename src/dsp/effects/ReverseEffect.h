@@ -15,13 +15,10 @@ public:
 
     ParamDescriptorSet getParamDescriptors() const noexcept override
     {
-        static constexpr const char* rateChoices[] = {
-            "1/4", "1/8", "1/16", "1/32", "1/64",
-            "1/4T", "1/8T", "1/16T",
-            "1/4.", "1/8.", "1/16."
-        };
-        static constexpr ParamDescriptor descs[] = {
-            { "sliceLen", "Reverse Slice Length", 0.0f, 10.0f, 2.0f, 0.0f, 1.0f, "", rateChoices, 11, true, true },
+        // Shared with Stutter via TimingMode.h -- see the note there about the v1 label bug.
+        static const char* const* rateChoices = legacyRateIndexLabels();
+        static const ParamDescriptor descs[] = {
+            { "sliceLen", "Reverse Slice Length", 0.0f, 10.0f, 2.0f, 0.0f, 1.0f, "", rateChoices, numLegacyRateIndices, true, true },
         };
         return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
     }

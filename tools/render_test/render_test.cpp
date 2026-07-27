@@ -23,6 +23,9 @@
 #include "PresetManager.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/ParameterIDs.h"
+#include "dsp/TimingMode.h"
+#include "dsp/effects/StutterEffect.h"
+#include "dsp/effects/ReverseEffect.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -610,6 +613,125 @@ bool testApvtsInternalBpmChangesFreeRunSpeed()
     return pass;
 }
 
+// (f) Rate choice labels must name the duration the DSP actually produces.
+//
+// Through v1.1.2 they did not: the rate table's fractions are relative to a quarter note,
+// but the labels read as if they were bar fractions, so every displayed value was 4x longer
+// than what was heard (selecting "1/4" produced a 16th-note loop). Nothing checked the
+// labels against the arithmetic, so the mismatch shipped. This test closes that gap for both
+// parameter surfaces -- the APVTS choice list a host sees, and the ParamDescriptor list the
+// UI builds its combo box from.
+bool testRateLabelsMatchActualDurations()
+{
+    printf ("\n[Test F] Rate choice labels name the durations actually produced\n");
+
+    // Parse "1/16", "1/32T", "1/64." into how many of that note fit in one bar. Take the
+    // denominator only -- retaining all digits would fold the leading "1/" into the number
+    // (turning "1/16" into 116).
+    auto notesPerBarFromLabel = [] (const juce::String& label) -> double
+    {
+        const double base = (double) label.fromFirstOccurrenceOf ("/", false, false)
+                                          .retainCharacters ("0123456789")
+                                          .getIntValue();
+        if (label.endsWith ("T")) return base * 1.5;  // triplet: 2/3 the length -> 3/2 as many
+        if (label.endsWith (".")) return base / 1.5;  // dotted: 3/2 the length -> 2/3 as many
+        return base;
+    };
+
+    bool ok = true;
+
+    // The DSP converts a table fraction to samples as (fraction / 0.25) * divisionLength,
+    // where a division is a 16th under the fixed v1 grid. Work in bar-relative terms so the
+    // check is independent of tempo and sample rate.
+    constexpr double divisionsPerBar = 16.0;
+    for (int i = 0; i < stutter::numLegacyRateIndices; ++i)
+    {
+        const double fraction = stutter::legacyRateIndexToFraction (i);
+        const double divisions = fraction / 0.25;              // in divisions (16ths)
+        const double notesPerBar = divisionsPerBar / divisions; // 1/N of a bar
+        const juce::String label = stutter::legacyRateIndexLabels()[i];
+        const double claimed = notesPerBarFromLabel (label);
+
+        const bool match = std::abs (claimed - notesPerBar) < 0.01;
+        if (! match)
+        {
+            printf ("  FAIL: index %d labelled \"%s\" (1/%.2f of bar) but produces 1/%.2f of bar\n",
+                    i, label.toRawUTF8(), claimed, notesPerBar);
+            ok = false;
+        }
+    }
+
+    // Both parameter surfaces must expose that same corrected list; they are built
+    // separately, so a fix applied to only one would leave the other lying.
+    StutterAudioProcessor processor;
+    processor.setPlayConfigDetails (2, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    auto checkApvtsChoices = [&ok] (juce::AudioProcessorValueTreeState& apvts,
+                                    int lane, const juce::String& paramName, const char* what)
+    {
+        auto* raw = apvts.getParameter (stutter::ID::lanePrefix (lane) + paramName);
+        auto* choice = dynamic_cast<juce::AudioParameterChoice*> (raw);
+        if (choice == nullptr)
+        {
+            printf ("  FAIL: %s is not a choice parameter\n", what);
+            ok = false;
+            return;
+        }
+        if (choice->choices.size() != stutter::numLegacyRateIndices)
+        {
+            printf ("  FAIL: %s has %d choices, expected %d\n",
+                    what, choice->choices.size(), stutter::numLegacyRateIndices);
+            ok = false;
+            return;
+        }
+        for (int i = 0; i < stutter::numLegacyRateIndices; ++i)
+            if (choice->choices[i] != juce::String (stutter::legacyRateIndexLabels()[i]))
+            {
+                printf ("  FAIL: %s choice %d is \"%s\", expected \"%s\"\n", what, i,
+                        choice->choices[i].toRawUTF8(), stutter::legacyRateIndexLabels()[i]);
+                ok = false;
+            }
+    };
+
+    checkApvtsChoices (processor.getAPVTS(), StutterAudioProcessor::laneStutter,
+                       stutter::ID::stutterRate, "APVTS Stutter Rate");
+    checkApvtsChoices (processor.getAPVTS(), StutterAudioProcessor::laneReverse,
+                       stutter::ID::reverseSliceLen, "APVTS Reverse Slice Length");
+
+    stutter::StutterEffect stutterEffect;
+    stutter::ReverseEffect reverseEffect;
+    const auto stutterDescs = stutterEffect.getParamDescriptors();
+    const auto reverseDescs = reverseEffect.getParamDescriptors();
+
+    auto checkDescriptorChoices = [&ok] (const stutter::ParamDescriptor& d, const char* what)
+    {
+        if (d.choices == nullptr || d.numChoices != stutter::numLegacyRateIndices)
+        {
+            printf ("  FAIL: %s descriptor has %d choices, expected %d\n",
+                    what, d.numChoices, stutter::numLegacyRateIndices);
+            ok = false;
+            return;
+        }
+        for (int i = 0; i < stutter::numLegacyRateIndices; ++i)
+            if (juce::String (d.choices[i]) != juce::String (stutter::legacyRateIndexLabels()[i]))
+            {
+                printf ("  FAIL: %s descriptor choice %d is \"%s\", expected \"%s\"\n", what, i,
+                        d.choices[i], stutter::legacyRateIndexLabels()[i]);
+                ok = false;
+            }
+    };
+
+    checkDescriptorChoices (stutterDescs[0], "Stutter rate");
+    checkDescriptorChoices (reverseDescs[0], "Reverse sliceLen");
+
+    if (ok)
+        printf ("  all %d labels match their produced duration on both surfaces (e.g. index 0 = \"%s\")\n",
+                stutter::numLegacyRateIndices, stutter::legacyRateIndexLabels()[0]);
+    printf ("  %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char* argv[])
@@ -744,7 +866,8 @@ int main (int argc, char* argv[])
     const bool testCPass = testMalformedCurveTreeFixtures();
     const bool testDPass = testSequencerOffBypassesStepsButCurvesStillWork();
     const bool testEPass = testApvtsInternalBpmChangesFreeRunSpeed();
-    if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass)
+    const bool testFPass = testRateLabelsMatchActualDurations();
+    if (! testAPass || ! testBPass || ! testCPass || ! testDPass || ! testEPass || ! testFPass)
         anyFailures = true;
 
     printf ("\n========================================================================================\n");

@@ -10,9 +10,9 @@ namespace stutter
     Glitch 2 gives every time-based module the same four-way selector, which is a good idea
     for a reason worth stating: it makes "1/8 triplet" expressible as (1/8, Triplet) rather
     than as its own entry in a flat list. v1 took the flat-list approach -- rateChoices() in
-    ParameterLayout.cpp:10 enumerated eleven strings ("1/4", "1/8", ..., "1/4T", "1/8T",
-    "1/16T", "1/4.", "1/8.", "1/16.") -- which meant adding dotted 1/32 required touching the
-    list, the lookup table, and every preset that indexed past the insertion point.
+    ParameterLayout.cpp enumerated eleven strings inline -- which meant adding a dotted entry
+    required touching the list, the lookup table, and every preset that indexed past the
+    insertion point.
 
     Decomposing into (base note, modifier) collapses those eleven entries into five bases and
     four modifiers, and makes the two orthogonal in the UI.
@@ -84,14 +84,20 @@ constexpr double noteFraction (int baseIndex, TimingMode mode) noexcept
     favour of (base, mode) when the choice parameters are reworked; until then this is the
     single definition the two effects share.
 
-    Index layout: 0-4 straight (1/4..1/64), 5-7 triplet (1/4T, 1/8T, 1/16T),
-                  8-10 dotted (1/4., 1/8., 1/16.).
+    Index layout: 0-4 straight, 5-7 triplet, 8-10 dotted.
+
+    IMPORTANT -- the fractions are relative to a QUARTER NOTE, not a bar. Index 0 returns
+    1/4, and the callers multiply by four divisions-per-quarter, so it produces a 16th-note
+    loop. Through v1.1.2 the UI labelled these entries "1/4".."1/64" as if they were bar
+    fractions, which made every displayed rate four times longer than what was heard. The
+    labels are now corrected in legacyRateIndexLabels() below; the arithmetic here is
+    unchanged, so presets are unaffected.
 
     Out-of-range indices clamp to [0, 10] to match v1's jlimit(0, n-1, index) -- note this
-    means a too-large index yields dotted 1/16 (the last table entry), not 1/64. That is not
-    reachable through the choice parameter, whose range is exactly 0..10, but modulation can
-    write arbitrary values into a parameter slot, so the edge is defined rather than left to
-    diverge from v1.
+    means a too-large index yields the last table entry (dotted), not the shortest straight
+    value. That is not reachable through the choice parameter, whose range is exactly 0..10,
+    but modulation can write arbitrary values into a parameter slot, so the edge is defined
+    rather than left to diverge from v1.
 */
 constexpr double legacyRateIndexToFraction (int index) noexcept
 {
@@ -104,6 +110,37 @@ constexpr double legacyRateIndexToFraction (int index) noexcept
         return baseNoteFraction (clamped - 8) * timingMultiplier (TimingMode::Dotted);
 
     return baseNoteFraction (clamped);
+}
+
+/** Number of entries in the legacy rate choice list. */
+inline constexpr int numLegacyRateIndices = 11;
+
+/**
+    Display labels for the legacy rate indices, in index order.
+
+    These name the duration the DSP actually produces. Index 0's fraction is 1/4 *of a
+    quarter note*, which is a 16th, hence "1/16" rather than "1/4". Keeping the labels here
+    beside legacyRateIndexToFraction() is deliberate: the two must agree, and v1 kept them
+    four files apart, which is how they came to disagree by a factor of four in the first
+    place.
+
+    The array is the single definition; legacyRateIndexLabel() indexes into it for callers
+    that want one entry, and ParamDescriptor::choices points at it directly.
+*/
+inline const char* const* legacyRateIndexLabels() noexcept
+{
+    static const char* const labels[numLegacyRateIndices] = {
+        "1/16", "1/32", "1/64", "1/128", "1/256",   // 0-4 straight
+        "1/16T", "1/32T", "1/64T",                  // 5-7 triplet
+        "1/16.", "1/32.", "1/64."                   // 8-10 dotted
+    };
+    return labels;
+}
+
+/** One label by index; nullptr when out of range, so callers cannot read past the end. */
+inline const char* legacyRateIndexLabel (int index) noexcept
+{
+    return (index >= 0 && index < numLegacyRateIndices) ? legacyRateIndexLabels()[index] : nullptr;
 }
 
 } // namespace stutter
