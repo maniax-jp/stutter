@@ -1,7 +1,5 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
 
 namespace stutter
 {
@@ -13,8 +11,18 @@ namespace stutter
 class RepitchEffect : public LaneEffect
 {
 public:
-    RepitchEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Buffer), apvts (state), laneIndex (laneIdx) {}
+    RepitchEffect() : LaneEffect (LaneCategory::Buffer) {}
+
+    const char* getName() const noexcept override { return "Repitch"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr ParamDescriptor descs[] = {
+            { "semitones", "Repitch Semitones", -24.0f, 24.0f, -12.0f, 0.0f, 1.0f, "st", nullptr, 0, true, true },
+            { "slide",     "Repitch Slide",       0.0f,  1.0f,   0.0f, 0.0f, 1.0f, "",   nullptr, 0, true, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -33,32 +41,33 @@ public:
         retrigSmoother.reset();
     }
 
-    void onStepEnd() override
+    void onBlockEnd() override
     {
         retrigSmoother.reset();
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
         juce::ignoreUnused (capture);
-        // Blend from the previous output into the newly-anchored slice on a per-step retrigger
+        // Blend from the previous output into the newly-anchored slice on a per-block retrigger
         // (the outer sequencer's gain crossfade can't mask this: gain is already 1.0).
         retrigSmoother.notifyRetrigger();
-        targetSemitones = getParam (ID::repitchSemitones, 0.0f);
-        slideAmount = getParam (ID::repitchSlide, 0.0f); // 0..1: 0 = instant, 1 = slides across whole step
-        loopLenSamples = juce::jmax (256.0, (double) stepLengthSamples);
-        stepLenSamplesD = (double) stepLengthSamples;
+        targetSemitones = params.get (0);
+        slideAmount = params.get (1); // 0..1: 0 = instant, 1 = slides across whole step
+        loopLenSamples = juce::jmax (256.0, ctx.divisionLengthSamples);
+        stepLenSamplesD = ctx.divisionLengthSamples;
         readPosSamples = 0.0;
         elapsedSamples = 0.0;
         // Fixed anchor: the looped slice is loopLenSamples immediately before "now", frozen for
         // the lifetime of this trigger.
-        anchorAbs = nowAbs;
+        anchorAbs = ctx.blockStartAbs;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (progress, nowAbs);
+        juce::ignoreUnused (ctx);
 
         float currentSemitones = targetSemitones;
         if (slideAmount > 0.0f)
@@ -128,15 +137,6 @@ private:
         return juce::jmin (msSamples, loopLenSamples * 0.1);
     }
 
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

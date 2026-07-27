@@ -22,14 +22,15 @@ StutterAudioProcessor::StutterAudioProcessor()
                            .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    sequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect> (apvts, laneStutter));
-    sequencer.setLaneEffect (laneTapeStop,  std::make_unique<TapeStopEffect> (apvts, laneTapeStop));
-    sequencer.setLaneEffect (laneTapeStart, std::make_unique<TapeStartEffect> (apvts, laneTapeStart));
-    sequencer.setLaneEffect (laneReverse,   std::make_unique<ReverseEffect> (apvts, laneReverse));
-    sequencer.setLaneEffect (laneRepitch,   std::make_unique<RepitchEffect> (apvts, laneRepitch));
-    sequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect> (apvts, laneGate));
-    sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect> (apvts, laneFilter));
-    sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect> (apvts, laneCrush));
+    sequencer.setApvts (&apvts);
+    sequencer.setLaneEffect (laneStutter,   std::make_unique<StutterEffect>());
+    sequencer.setLaneEffect (laneTapeStop,  std::make_unique<TapeStopEffect>());
+    sequencer.setLaneEffect (laneTapeStart, std::make_unique<TapeStartEffect>());
+    sequencer.setLaneEffect (laneReverse,   std::make_unique<ReverseEffect>());
+    sequencer.setLaneEffect (laneRepitch,   std::make_unique<RepitchEffect>());
+    sequencer.setLaneEffect (laneGate,      std::make_unique<GateEffect>());
+    sequencer.setLaneEffect (laneFilter,    std::make_unique<FilterEffect>());
+    sequencer.setLaneEffect (laneCrush,     std::make_unique<CrushEffect>());
 
     presetManager = std::make_unique<stutter::PresetManager> (*this);
 }

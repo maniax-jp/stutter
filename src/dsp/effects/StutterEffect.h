@@ -1,7 +1,6 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
+#include "../TimingMode.h"
 
 namespace stutter
 {
@@ -14,8 +13,24 @@ namespace stutter
 class StutterEffect : public LaneEffect
 {
 public:
-    StutterEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Buffer), apvts (state), laneIndex (laneIdx) {}
+    StutterEffect() : LaneEffect (LaneCategory::Buffer) {}
+
+    const char* getName() const noexcept override { return "Stutter"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr const char* rateChoices[] = {
+            "1/4", "1/8", "1/16", "1/32", "1/64",
+            "1/4T", "1/8T", "1/16T",
+            "1/4.", "1/8.", "1/16."
+        };
+        static constexpr ParamDescriptor descs[] = {
+            { "rate",       "Stutter Rate",        0.0f, 10.0f,  2.0f, 0.0f, 1.0f, "",  rateChoices, 11, true,  true },
+            { "decay",      "Stutter Decay",       0.0f,  1.0f,  0.0f, 0.0f, 1.0f, "",  nullptr,     0,  true,  true },
+            { "pitchSlide", "Stutter Pitch Slide", -24.0f, 24.0f, 0.0f, 0.0f, 1.0f, "st", nullptr,   0,  true,  true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -35,28 +50,34 @@ public:
         retrigSmoother.reset();
     }
 
-    void onStepEnd() override
+    void onBlockEnd() override
     {
-        // Step region fully ended (outer gain faded to silence): the next onStepStart is a
+        // Block region fully ended (outer gain faded to silence): the next onBlockStart is a
         // fresh start, not a retrigger -- don't blend from stale held output.
         retrigSmoother.reset();
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
         juce::ignoreUnused (capture);
 
-        // If we were already audible (per-step retrigger of an active lane), arm a short blend
+        // If we were already audible (per-block retrigger of an active lane), arm a short blend
         // from the previous output into the newly-anchored slice: the outer sequencer's gain
         // crossfade cannot mask this transition (gain is already 1.0 on a retrigger).
         retrigSmoother.notifyRetrigger();
 
-        const float rateParam = getParam (ID::stutterRate, 4.0f);   // divisions index, see rateToFraction
-        const float decayParam = getParam (ID::stutterDecay, 0.0f); // 0..1: how much loop shrinks per repeat
-        pitchSlideSemis = getParam (ID::stutterPitchSlide, 0.0f);
+        const float decayParam = params.get (1); // 0..1: how much loop shrinks per repeat
+        pitchSlideSemis = params.get (2);
 
-        const double fraction = rateToFraction ((int) rateParam);
-        baseLoopLenSamples = juce::jmax (32.0, stepLengthSamples * fraction * 4.0); // stepLength = 1/16, scale to musical fraction of a bar
+        // The rate table is in fractions of a quarter note (v1 labelled them as bar fractions
+        // but hardcoded `* 4.0` against a 16th-note step -- preserving that labelling bug);
+        // quarterBarFraction is therefore 1/4 of a bar, and a division under the v1 grid is
+        // 1/16 of a bar, hence the 4:1 ratio that v1 hardcoded as `* 4.0`.
+        constexpr double quarterBarFraction = 0.25;
+        const double fraction = legacyRateIndexToFraction (params.getIndex (0));
+        baseLoopLenSamples = juce::jmax (32.0,
+            fraction / quarterBarFraction * ctx.divisionLengthSamples);
         loopLenSamples = baseLoopLenSamples;
         decayAmount = decayParam;
         readPosSamples = 0.0;
@@ -66,13 +87,13 @@ public:
         // for the lifetime of this trigger. All reads below are expressed as an absolute
         // CaptureBuffer position derived from this anchor, so they no longer drift as the ring
         // buffer's write head advances on subsequent blocks.
-        anchorAbs = nowAbs;
+        anchorAbs = ctx.blockStartAbs;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (progress, nowAbs);
+        juce::ignoreUnused (ctx);
 
         // Pitch slide: ramps semitone offset from 0 to pitchSlideSemis across repeats (capped at ~8 repeats span)
         const float slideProgress = juce::jlimit (0.0f, 1.0f, (float) repeatCount / 8.0f);
@@ -142,27 +163,6 @@ public:
     }
 
 private:
-    static double rateToFraction (int index)
-    {
-        // index -> fraction of a bar; includes straight, triplet, dotted variants
-        static const double table[] = {
-            1.0 / 4.0,          // 0: 1/4
-            1.0 / 8.0,          // 1: 1/8
-            1.0 / 16.0,         // 2: 1/16
-            1.0 / 32.0,         // 3: 1/32
-            1.0 / 64.0,         // 4: 1/64
-            (1.0 / 4.0) * (2.0 / 3.0),  // 5: 1/4 triplet
-            (1.0 / 8.0) * (2.0 / 3.0),  // 6: 1/8 triplet
-            (1.0 / 16.0) * (2.0 / 3.0), // 7: 1/16 triplet
-            (1.0 / 4.0) * 1.5,  // 8: 1/4 dotted
-            (1.0 / 8.0) * 1.5,  // 9: 1/8 dotted
-            (1.0 / 16.0) * 1.5, // 10: 1/16 dotted
-        };
-        constexpr int n = (int) (sizeof (table) / sizeof (double));
-        index = juce::jlimit (0, n - 1, index);
-        return table[index];
-    }
-
     // Loop-boundary warp crossfade length: 2-5ms, capped at 10% of the loop so short/decayed
     // loops (Stutter-Edit decay shrinking the loop toward 32 samples) never fade more than a
     // tenth of their own length.
@@ -184,15 +184,6 @@ private:
         return juce::jmax (32.0, loopLenSamples * shrink);
     }
 
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

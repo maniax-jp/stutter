@@ -1,11 +1,12 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_data_structures/juce_data_structures.h>
 #include <array>
 #include <cmath>
 #include <memory>
 #include "CaptureBuffer.h"
-#include "LaneEffect.h"
+#include "LaneEffectV2.h"
 #include "ParameterIDs.h"
 
 namespace stutter
@@ -24,7 +25,11 @@ static constexpr int numSteps = 16;
       - Enforce category rules: Buffer lanes are mutually exclusive (topmost active wins),
         Texture lanes stack
       - Crossfade (~5ms) across step boundaries / lane hand-offs to avoid clicks
-      - Drive each LaneEffect's onStepStart/processSample/onStepEnd lifecycle
+      - Drive each LaneEffect's onBlockStart/processSample/onBlockEnd lifecycle
+
+    Parameter source (WP1 scaffolding): LaneParams are filled from APVTS at onBlockStart
+    time by walking each effect's getParamDescriptors(). WP2/WP3 will replace this with
+    scene snapshots; until then APVTS remains the live parameter mirror.
 */
 class StepSequencer
 {
@@ -35,6 +40,10 @@ public:
             for (auto& s : lane)
                 s.store (false, std::memory_order_relaxed);
     }
+
+    /** WP1 scaffolding: effects no longer hold APVTS; the sequencer reads it when filling
+        LaneParams. Non-owning; must outlive this sequencer. */
+    void setApvts (juce::AudioProcessorValueTreeState* state) noexcept { apvts = state; }
 
     void setLaneEffect (int laneIndex, std::unique_ptr<LaneEffect> effect)
     {
@@ -210,6 +219,7 @@ public:
             const int stepLenSamplesEstimate = ppqPerSample > 0.0
                 ? (int) std::round (ppqPerStep / ppqPerSample)
                 : (int) sampleRate;
+            const double patternPhase = patternLengthPpq > 0.0 ? patternPos / patternLengthPpq : 0.0;
 
             playheadStep.store (stepIndex, std::memory_order_relaxed);
 
@@ -252,7 +262,8 @@ public:
                     continue;
 
                 const bool shouldBeActive = (l == activeBufferLane);
-                updateLaneLifecycle (st, effect, shouldBeActive, stepIndex, capture, stepLenSamplesEstimate, nowAbs);
+                updateLaneLifecycle (st, effect, l, shouldBeActive, stepIndex, capture,
+                                     stepLenSamplesEstimate, nowAbs, ppqPerSample);
 
                 if (st.gain > 0.0f)
                 {
@@ -260,7 +271,14 @@ public:
                     for (int c = 0; c < chCount; ++c)
                         wet[c] = working[c];
 
-                    effect->processSample (capture, wet, chCount, stepPhase, nowAbs);
+                    SampleContext sctx;
+                    sctx.nowAbs = nowAbs;
+                    sctx.blockProgress = stepPhase;
+                    sctx.patternPhase = patternPhase;
+                    sctx.modulatedParams = laneParams[(size_t) l].params.data();
+                    sctx.reverseDirection = false;
+                    sctx.freeze = false;
+                    effect->processSample (capture, wet, chCount, sctx);
 
                     // Equal-power crossfade curve (rather than linear) so that a hand-off between
                     // two buffer lanes (one fading out while another fades in on the same sample
@@ -283,7 +301,8 @@ public:
                     continue;
 
                 const bool shouldBeActive = textureActive[(size_t) l];
-                updateLaneLifecycle (st, effect, shouldBeActive, stepIndex, capture, stepLenSamplesEstimate, nowAbs);
+                updateLaneLifecycle (st, effect, l, shouldBeActive, stepIndex, capture,
+                                     stepLenSamplesEstimate, nowAbs, ppqPerSample);
 
                 if (st.gain > 0.0f)
                 {
@@ -291,7 +310,14 @@ public:
                     for (int c = 0; c < chCount; ++c)
                         wet[c] = working[c];
 
-                    effect->processSample (capture, wet, chCount, stepPhase, nowAbs);
+                    SampleContext sctx;
+                    sctx.nowAbs = nowAbs;
+                    sctx.blockProgress = stepPhase;
+                    sctx.patternPhase = patternPhase;
+                    sctx.modulatedParams = laneParams[(size_t) l].params.data();
+                    sctx.reverseDirection = false;
+                    sctx.freeze = false;
+                    effect->processSample (capture, wet, chCount, sctx);
 
                     // Equal-power crossfade curve (same sin() taper as the Buffer-lane hand-off
                     // above), rather than a linear st.gain blend: keeps the summed power roughly
@@ -320,24 +346,70 @@ private:
         int fadeCounter = 0;
     };
 
-    void updateLaneLifecycle (LaneRuntimeState& st, LaneEffect* effect, bool shouldBeActive,
-                               int stepIndex, const CaptureBuffer& capture, int stepLenSamples,
-                               juce::int64 nowAbs)
+    /** Fill LaneParams for one lane by reading APVTS with the same ID scheme each effect
+        used to use internally (lane{N}_{descriptor.id}), falling back to the descriptor
+        default when a parameter is missing. */
+    void fillLaneParams (int lane, LaneEffect* effect, LaneParams& out) const
+    {
+        const auto set = effect->getParamDescriptors();
+        for (int i = 0; i < set.count && i < maxParamsPerLane; ++i)
+        {
+            float value = set[i].defaultValue;
+            if (apvts != nullptr)
+            {
+                const juce::String id = ID::lanePrefix (lane) + set[i].id;
+                if (auto* p = apvts->getRawParameterValue (id))
+                    value = p->load();
+            }
+            out.set (i, value);
+        }
+    }
+
+    BlockContext makeBlockContext (int stepLenSamples, juce::int64 nowAbs,
+                                   double ppqPerSample, bool isRetrigger) const noexcept
+    {
+        BlockContext ctx;
+        ctx.blockStartAbs = nowAbs;
+        // v1 blocks are one step: block length == division length == the rounded step estimate.
+        const double divLen = (double) stepLenSamples;
+        ctx.blockLengthSamples = divLen;
+        ctx.divisionLengthSamples = divLen;
+        ctx.divisionBarFraction = 1.0 / 16.0; // v1's fixed 16th-note grid
+        ctx.ppqPerSample = ppqPerSample;
+        ctx.sampleRate = sampleRate;
+        ctx.seed = 0;
+        ctx.isRetrigger = isRetrigger;
+        return ctx;
+    }
+
+    void triggerBlockStart (LaneRuntimeState& st, LaneEffect* effect, int lane,
+                            int stepIndex, const CaptureBuffer& capture, int stepLenSamples,
+                            juce::int64 nowAbs, double ppqPerSample, bool isRetrigger)
+    {
+        st.currentStep = stepIndex;
+        fillLaneParams (lane, effect, laneParams[(size_t) lane]);
+        const BlockContext bctx = makeBlockContext (stepLenSamples, nowAbs, ppqPerSample, isRetrigger);
+        effect->onBlockStart (capture, laneParams[(size_t) lane], bctx);
+    }
+
+    void updateLaneLifecycle (LaneRuntimeState& st, LaneEffect* effect, int lane,
+                               bool shouldBeActive, int stepIndex, const CaptureBuffer& capture,
+                               int stepLenSamples, juce::int64 nowAbs, double ppqPerSample)
     {
         if (shouldBeActive && ! st.active)
         {
             // Trigger start of a new ON run.
             st.active = true;
-            st.currentStep = stepIndex;
             st.fadeDirection = 1;
-            effect->onStepStart (capture, stepLenSamples, nowAbs);
+            triggerBlockStart (st, effect, lane, stepIndex, capture, stepLenSamples,
+                               nowAbs, ppqPerSample, false);
         }
         else if (shouldBeActive && st.active && st.currentStep != stepIndex)
         {
             // Crossing a step boundary while continuously active (same lane ON on two
             // consecutive steps). Whether this re-latches the effect's anchor/envelope depends
             // on its RetriggerPolicy:
-            //  - RetriggerEachStep (e.g. Stutter): re-trigger every step, as before.
+            //  - RetriggerEachBlock (e.g. Stutter): re-trigger every step, as before.
             //  - ContinueThroughRun (e.g. TapeStop/TapeStart): only re-trigger when this step
             //    does NOT immediately continue the previous one (i.e. there was a gap / this is
             //    genuinely a fresh run) -- but updateLaneLifecycle is only reached here when
@@ -345,19 +417,20 @@ private:
             //    (a broken run would have gone through the "! shouldBeActive" fade-out branch
             //    and reset st.active to false in advanceFade). So for ContinueThroughRun lanes,
             //    a step-boundary crossing while still active means "keep going" -- do not
-            //    call onStepStart again, just update the step index for stepPhase bookkeeping.
+            //    call onBlockStart again, just update the step index for stepPhase bookkeeping.
             st.currentStep = stepIndex;
-            if (effect->getRetriggerPolicy() == RetriggerPolicy::RetriggerEachStep)
+            if (effect->getRetriggerPolicy() == RetriggerPolicy::RetriggerEachBlock)
             {
                 st.fadeDirection = 1;
-                effect->onStepStart (capture, stepLenSamples, nowAbs);
+                triggerBlockStart (st, effect, lane, stepIndex, capture, stepLenSamples,
+                                   nowAbs, ppqPerSample, true);
             }
             else if (st.fadeDirection < 0)
             {
                 // ContinueThroughRun lane re-activated while still fading out (possible when the
                 // ~5ms crossfade outlasts a whole step at extreme BPM, or on live pattern
                 // edits): cancel the fade-out and ramp the gain back in WITHOUT re-latching the
-                // envelope/anchor via onStepStart -- otherwise the lane would silently finish
+                // envelope/anchor via onBlockStart -- otherwise the lane would silently finish
                 // fading to zero and deactivate even though its step is ON.
                 st.fadeDirection = 1;
             }
@@ -398,10 +471,10 @@ private:
                     st.active = false;
                     st.currentStep = -1;
                     // Fade-out has fully completed (active -> inactive transition): let the
-                    // effect know its step region has ended so it can reset any state that
-                    // depends on onStepEnd (mirrors onStepStart's lifecycle contract).
+                    // effect know its block region has ended so it can reset any state that
+                    // depends on onBlockEnd (mirrors onBlockStart's lifecycle contract).
                     if (effect != nullptr)
-                        effect->onStepEnd();
+                        effect->onBlockEnd();
                 }
             }
         }
@@ -414,6 +487,9 @@ private:
     std::array<std::array<std::atomic<bool>, numSteps>, numLanes> steps {};
     std::array<std::unique_ptr<LaneEffect>, numLanes> laneEffects;
     std::array<LaneRuntimeState, numLanes> laneState;
+    std::array<LaneParams, numLanes> laneParams {};
+
+    juce::AudioProcessorValueTreeState* apvts = nullptr;
 
     double sampleRate = 44100.0;
     int numChannels = 2;

@@ -1,8 +1,7 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
 #include <array>
+#include <cmath>
 
 namespace stutter
 {
@@ -15,8 +14,18 @@ namespace stutter
 class TapeStopEffect : public LaneEffect
 {
 public:
-    TapeStopEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Buffer), apvts (state), laneIndex (laneIdx) {}
+    TapeStopEffect() : LaneEffect (LaneCategory::Buffer) {}
+
+    const char* getName() const noexcept override { return "Tape Stop"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr ParamDescriptor descs[] = {
+            { "curve", "TapeStop Curve", 0.0f, 1.0f, 0.5f, 0.0f, 1.0f, "", nullptr, 0, true, true },
+            { "time",  "TapeStop Time",  0.0f, 1.0f, 0.5f, 0.0f, 1.0f, "", nullptr, 0, true, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -37,28 +46,29 @@ public:
             v = 0.0f;
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
         juce::ignoreUnused (capture);
-        curveAmount = getParam (ID::tapeStopCurve, 0.5f);
-        const float timeParam = getParam (ID::tapeStopTime, 0.5f); // 0..1 -> scales decel duration
-        // Duration ranges from ~0.25x to ~3x the step length
+        curveAmount = params.get (0);
+        const float timeParam = params.get (1); // 0..1 -> scales decel duration
+        // Duration ranges from ~0.25x to ~3x the division length
         const double scale = 0.25 + timeParam * 2.75;
-        durationSamples = juce::jmax (256.0, stepLengthSamples * scale);
+        durationSamples = juce::jmax (256.0, ctx.divisionLengthSamples * scale);
         elapsedSamples = 0.0;
         readOffsetSamples = 0.0;
-        // Anchor "now" once, at the start of the (possibly multi-step) continuous ON run --
+        // Anchor "now" once, at the start of the (possibly multi-block) continuous ON run --
         // see getRetriggerPolicy(). The read head then advances forward from this anchor at
         // the decelerating speed, i.e. it falls further and further behind "now" as speed drops
         // toward 0, which is what makes it sound like tape slowing down rather than a jump cut.
-        anchorAbs = nowAbs;
+        anchorAbs = ctx.blockStartAbs;
         stopped = false;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (progress, nowAbs);
+        juce::ignoreUnused (ctx);
 
         // Once the decel curve has fully reached speed 0, the read position stops advancing
         // forever (ContinueThroughRun lanes may stay active far longer than this buffer's ~2.5s
@@ -99,7 +109,7 @@ public:
     }
 
     // TapeStop's deceleration is a single directional envelope across the whole ON region: if a
-    // pattern holds this lane on for several consecutive 16ths, re-triggering on every step
+    // pattern holds this lane on for several consecutive 16ths, re-triggering on every block
     // boundary would restart the decel from full speed each time and it would never actually
     // reach a stop within a busy pattern. Continue the same envelope/anchor through an unbroken
     // run and only re-latch when a fresh (non-contiguous) run begins.
@@ -116,17 +126,8 @@ private:
         return juce::jmap ((double) curveAmount, 0.0, 1.0, linear, exp);
     }
 
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
     static constexpr int maxChannels = 8;
 
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 

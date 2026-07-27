@@ -1,7 +1,6 @@
 #pragma once
-#include "../LaneEffect.h"
-#include "../ParameterIDs.h"
-#include <juce_audio_processors/juce_audio_processors.h>
+#include "../LaneEffectV2.h"
+#include "../TimingMode.h"
 
 namespace stutter
 {
@@ -10,8 +9,22 @@ namespace stutter
 class ReverseEffect : public LaneEffect
 {
 public:
-    ReverseEffect (juce::AudioProcessorValueTreeState& state, int laneIdx)
-        : LaneEffect (LaneCategory::Buffer), apvts (state), laneIndex (laneIdx) {}
+    ReverseEffect() : LaneEffect (LaneCategory::Buffer) {}
+
+    const char* getName() const noexcept override { return "Reverse"; }
+
+    ParamDescriptorSet getParamDescriptors() const noexcept override
+    {
+        static constexpr const char* rateChoices[] = {
+            "1/4", "1/8", "1/16", "1/32", "1/64",
+            "1/4T", "1/8T", "1/16T",
+            "1/4.", "1/8.", "1/16."
+        };
+        static constexpr ParamDescriptor descs[] = {
+            { "sliceLen", "Reverse Slice Length", 0.0f, 10.0f, 2.0f, 0.0f, 1.0f, "", rateChoices, 11, true, true },
+        };
+        return { descs, (int) (sizeof (descs) / sizeof (descs[0])) };
+    }
 
     void prepare (double sampleRateIn, int numChannelsIn) override
     {
@@ -29,30 +42,37 @@ public:
         retrigSmoother.reset();
     }
 
-    void onStepEnd() override
+    void onBlockEnd() override
     {
         retrigSmoother.reset();
     }
 
-    void onStepStart (const CaptureBuffer& capture, int stepLengthSamples, juce::int64 nowAbs) override
+    void onBlockStart (const CaptureBuffer& capture, const LaneParams& params,
+                       const BlockContext& ctx) override
     {
         juce::ignoreUnused (capture);
-        // Blend from the previous output into the newly-anchored slice on a per-step retrigger
+        // Blend from the previous output into the newly-anchored slice on a per-block retrigger
         // (the outer sequencer's gain crossfade can't mask this: gain is already 1.0).
         retrigSmoother.notifyRetrigger();
-        const float sliceLenParam = getParam (ID::reverseSliceLen, 2.0f); // divisions index like stutter rate
-        const double fraction = rateToFraction ((int) sliceLenParam);
-        sliceLenSamples = juce::jmax (32.0, stepLengthSamples * fraction * 4.0);
+
+        // The rate table is in fractions of a quarter note (v1 labelled them as bar fractions
+        // but hardcoded `* 4.0` against a 16th-note step -- preserving that labelling bug);
+        // quarterBarFraction is therefore 1/4 of a bar, and a division under the v1 grid is
+        // 1/16 of a bar, hence the 4:1 ratio that v1 hardcoded as `* 4.0`.
+        constexpr double quarterBarFraction = 0.25;
+        const double fraction = legacyRateIndexToFraction (params.getIndex (0));
+        sliceLenSamples = juce::jmax (32.0,
+            fraction / quarterBarFraction * ctx.divisionLengthSamples);
         readPosSamples = 0.0;
         // Fixed anchor: the reversed slice is the sliceLenSamples immediately before "now",
         // frozen for the lifetime of this trigger (see CaptureBuffer::readInterpolatedAbsolute).
-        anchorAbs = nowAbs;
+        anchorAbs = ctx.blockStartAbs;
     }
 
-    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh, double progress,
-                         juce::int64 nowAbs) override
+    void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
+                        const SampleContext& ctx) override
     {
-        juce::ignoreUnused (progress, nowAbs);
+        juce::ignoreUnused (ctx);
 
         // Slice spans absolute positions [anchorAbs - sliceLen, anchorAbs]. readPos moving
         // 0 -> sliceLen steps the read point from the slice's end back toward its start, which
@@ -110,27 +130,6 @@ private:
         return juce::jmin (msSamples, sliceLenSamples * 0.1);
     }
 
-    static double rateToFraction (int index)
-    {
-        static const double table[] = {
-            1.0 / 4.0, 1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0, 1.0 / 64.0,
-            (1.0 / 4.0) * (2.0 / 3.0), (1.0 / 8.0) * (2.0 / 3.0), (1.0 / 16.0) * (2.0 / 3.0),
-            (1.0 / 4.0) * 1.5, (1.0 / 8.0) * 1.5, (1.0 / 16.0) * 1.5,
-        };
-        constexpr int n = (int) (sizeof (table) / sizeof (double));
-        index = juce::jlimit (0, n - 1, index);
-        return table[index];
-    }
-
-    float getParam (const juce::String& name, float fallback) const
-    {
-        if (auto* p = apvts.getRawParameterValue (ID::lanePrefix (laneIndex) + name))
-            return p->load();
-        return fallback;
-    }
-
-    juce::AudioProcessorValueTreeState& apvts;
-    int laneIndex;
     double sampleRate = 44100.0;
     int numChannels = 2;
 
