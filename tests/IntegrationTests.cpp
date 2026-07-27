@@ -864,3 +864,71 @@ TEST_CASE ("Switching scenes mid-playback does not click", "[presets][click]")
           << ", severe clicks " << m.severeClickCount);
     CHECK (m.severeClickCount == 0);
 }
+
+TEST_CASE ("A lane knob edit survives a scene round-trip", "[processor][mirror]")
+{
+    // APVTS only mirrors the active scene, so an edit that stops there is discarded the next
+    // time a scene change refills the mirror. Turning a knob and then playing another note
+    // used to silently lose the edit.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    doc.ensureScene (60);
+    doc.ensureScene (61);
+    doc.publish();
+
+    proc.getGestureEngine().setActiveScene (60);
+    proc.pumpSceneMirror();
+
+    const auto id = ID::lanePrefix (0) + ID::stutterDecay;
+    auto* param = proc.getAPVTS().getParameter (id);
+    REQUIRE (param != nullptr);
+    const auto& range = proc.getAPVTS().getParameterRange (id);
+    param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+
+    // The edit must reach the scene, not just the mirror.
+    const auto* stored = proc.getSceneStore().get (60);
+    REQUIRE (stored != nullptr);
+    CHECK_THAT (stored->lanes[0].params[1], WithinAbs (0.85f, 1.0e-4f));
+
+    // Switch away and back, as playing two notes would.
+    proc.getGestureEngine().setActiveScene (61);
+    proc.pumpSceneMirror();
+    proc.getGestureEngine().setActiveScene (60);
+    proc.pumpSceneMirror();
+
+    CHECK_THAT (proc.getAPVTS().getRawParameterValue (id)->load(), WithinAbs (0.85f, 1.0e-4f));
+}
+
+TEST_CASE ("Editing one scene's knob does not leak into another", "[processor][mirror]")
+{
+    // The write-back has to target the scene the mirror was filled from. Taking the live
+    // scene instead would copy the outgoing scene's values over the incoming one.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    doc.ensureScene (60);
+    doc.ensureScene (61);
+    doc.publish();
+
+    const auto id = ID::lanePrefix (0) + ID::stutterDecay;
+    const auto& range = proc.getAPVTS().getParameterRange (id);
+    auto* param = proc.getAPVTS().getParameter (id);
+
+    proc.getGestureEngine().setActiveScene (60);
+    proc.pumpSceneMirror();
+    param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+
+    proc.getGestureEngine().setActiveScene (61);
+    proc.pumpSceneMirror();
+    param->setValueNotifyingHost (range.convertTo0to1 (0.20f));
+
+    const auto* a = proc.getSceneStore().get (60);
+    const auto* b = proc.getSceneStore().get (61);
+    REQUIRE (a != nullptr);
+    REQUIRE (b != nullptr);
+    CHECK_THAT (a->lanes[0].params[1], WithinAbs (0.85f, 1.0e-4f));
+    CHECK_THAT (b->lanes[0].params[1], WithinAbs (0.20f, 1.0e-4f));
+}

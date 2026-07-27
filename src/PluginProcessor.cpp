@@ -62,10 +62,39 @@ StutterAudioProcessor::StutterAudioProcessor()
 
     sceneDocument = std::make_unique<stutter::SceneDocument> (sceneStore, undoManager);
     presetManager = std::make_unique<stutter::PresetManager> (*this);
+
+    // Mirror write-back. APVTS holds a copy of the active scene's lane values, so an edit that
+    // stops there is discarded the next time a scene change refills the mirror -- which is
+    // what turning a knob and then playing another note used to do.
+    for (int lane = 0; lane < stutter::maxLanes; ++lane)
+    {
+        auto* effect = blockSequencer.getLaneEffect (lane);
+        if (effect == nullptr)
+            continue;
+
+        const auto set = effect->getParamDescriptors();
+        for (int p = 0; p < set.count && p < stutter::maxParamsPerLane; ++p)
+        {
+            const auto id = ID::lanePrefix (lane) + set[p].id;
+            if (apvts.getParameter (id) == nullptr)
+                continue;
+
+            auto listener = std::make_unique<LaneParamWriteback> (*this, lane, p, id);
+            apvts.addParameterListener (id, listener.get());
+            laneParamWritebacks.push_back (std::move (listener));
+        }
+    }
+
     startTimerHz (2);
 }
 
-StutterAudioProcessor::~StutterAudioProcessor() = default;
+StutterAudioProcessor::~StutterAudioProcessor()
+{
+    // APVTS outlives the listeners it holds raw pointers to, so they have to be detached
+    // explicitly rather than left to member destruction order.
+    for (auto& w : laneParamWritebacks)
+        apvts.removeParameterListener (w->paramID, w.get());
+}
 
 //==============================================================================
 juce::AudioProcessorValueTreeState::ParameterLayout StutterAudioProcessor::createParameterLayout()
@@ -704,6 +733,56 @@ void StutterAudioProcessor::mirrorActiveSceneToApvts()
     }
 
     mirroredScene = scene;
+}
+
+void StutterAudioProcessor::writeLaneParamToScene (int lane, int paramIndex, float value)
+{
+    if (sceneDocument == nullptr || suppressParamWriteback)
+        return;
+
+    // Write to the scene the mirror was last filled from, not to whatever is active now. A
+    // scene change flags the mirror and the timer refills it, so between those two moments
+    // the APVTS values still belong to the previous scene; taking the live scene here would
+    // copy the old scene's values over the new one.
+    const int target = mirroredScene >= 0 ? mirroredScene : gestureEngine.getActiveScene();
+
+    auto sceneTree = sceneDocument->ensureScene (target);
+    if (! sceneTree.isValid())
+        return;
+
+    auto laneParams = sceneTree.getOrCreateChildWithName (stutter::SceneIDs::laneParams, nullptr);
+
+    juce::ValueTree laneNode;
+    for (int i = 0; i < laneParams.getNumChildren(); ++i)
+        if ((int) laneParams.getChild (i).getProperty (stutter::SceneIDs::index, -1) == lane)
+            laneNode = laneParams.getChild (i);
+
+    if (! laneNode.isValid())
+    {
+        laneNode = juce::ValueTree (stutter::SceneIDs::lane);
+        laneNode.setProperty (stutter::SceneIDs::index, lane, nullptr);
+        laneParams.appendChild (laneNode, nullptr);
+    }
+
+    for (int i = 0; i < laneNode.getNumChildren(); ++i)
+    {
+        auto pt = laneNode.getChild (i);
+        if (pt.hasType (stutter::SceneIDs::param)
+            && (int) pt.getProperty (stutter::SceneIDs::paramIndexProp, -1) == paramIndex)
+        {
+            // No undo entry: knob drags emit a continuous stream of these, and one history
+            // step per pixel would make undo useless for everything else.
+            pt.setProperty (stutter::SceneIDs::value, value, nullptr);
+            sceneDocument->publish();
+            return;
+        }
+    }
+
+    juce::ValueTree pt (stutter::SceneIDs::param);
+    pt.setProperty (stutter::SceneIDs::paramIndexProp, paramIndex, nullptr);
+    pt.setProperty (stutter::SceneIDs::value, value, nullptr);
+    laneNode.appendChild (pt, nullptr);
+    sceneDocument->publish();
 }
 
 void StutterAudioProcessor::loadInitState()

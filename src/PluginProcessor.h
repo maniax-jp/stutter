@@ -97,6 +97,11 @@ private:
         write-back listener must be suppressed while it runs. */
     void mirrorActiveSceneToApvts();
 
+    /** Write one lane parameter back into the scene it belongs to.
+        APVTS is only a mirror: without this a knob edit lives in the mirror alone and is
+        overwritten the next time a scene change refills it, so the edit disappears. */
+    void writeLaneParamToScene (int lane, int paramIndex, float value);
+
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
         split into successive calls to this. */
@@ -172,6 +177,25 @@ private:
 
     /** Which scene APVTS currently reflects; -1 before the first mirror. */
     int mirroredScene = -1;
+
+    /** One per lane parameter, so the callback already knows which lane and slot it is for
+        rather than parsing "lane3_decay" back apart on every knob move. */
+    struct LaneParamWriteback : juce::AudioProcessorValueTreeState::Listener
+    {
+        LaneParamWriteback (StutterAudioProcessor& p, int l, int idx, juce::String id)
+            : owner (p), lane (l), paramIndex (idx), paramID (std::move (id)) {}
+
+        void parameterChanged (const juce::String&, float newValue) override
+        {
+            owner.writeLaneParamToScene (lane, paramIndex, newValue);
+        }
+
+        StutterAudioProcessor& owner;
+        int lane, paramIndex;
+        juce::String paramID;   // kept so detaching does not have to re-derive it
+    };
+
+    std::vector<std::unique_ptr<LaneParamWriteback>> laneParamWritebacks;
 
     juce::UndoManager undoManager;
     std::unique_ptr<stutter::SceneDocument> sceneDocument;
