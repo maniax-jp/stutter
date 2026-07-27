@@ -635,3 +635,59 @@ TEST_CASE ("Grid geometry edits reach the audio path", "[document][geometry]")
         CHECK (g->lanes[0].blocks[0].lengthDiv == 2);
     }
 }
+
+TEST_CASE ("Every editable field survives save and reload", "[state][roundtrip]")
+{
+    // A catch-all for the class of bug that kept appearing: something the UI can change that
+    // never reaches the saved state, or reaches it and cannot be read back. Each field here
+    // is one a user can actually edit, so anything added to the UI without a serialisation
+    // path fails this rather than being noticed months later in a project that lost work.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+    auto& doc = proc.getSceneDocument();
+    const int sc = ui::SceneBrowser::defaultScene;
+
+    doc.ensureScene (sc);
+    doc.setBeats (sc, 3);
+    doc.setDivisions (sc, 6);
+    doc.setSwing (sc, 0.37f);
+    doc.addBlock (sc, 5, 2, 4);
+    doc.toggleLaneMute (sc, 7);
+    doc.toggleLaneSolo (sc, 5);
+    auto sceneTree = doc.ensureScene (sc);
+    sceneTree.setProperty (SceneIDs::releaseMode, (int) ReleaseMode::Latch, nullptr);
+    doc.publish();
+
+    proc.getGestureEngine().setActiveScene (sc);
+    proc.pumpSceneMirror();
+    const auto decayId = ID::lanePrefix (0) + ID::stutterDecay;
+    const auto& range = proc.getAPVTS().getParameterRange (decayId);
+    proc.getAPVTS().getParameter (decayId)->setValueNotifyingHost (range.convertTo0to1 (0.66f));
+
+    proc.getGestureEngine().setPlayMode (PlayMode::Midi);
+    proc.getGestureEngine().setSceneLock (true);
+    proc.getGestureEngine().setTriggerQuantize (0.5);
+
+    juce::MemoryBlock saved;
+    proc.getStateInformation (saved);
+
+    StutterAudioProcessor restored;
+    restored.prepareToPlay (48000.0, 512);
+    restored.setStateInformation (saved.getData(), (int) saved.getSize());
+
+    const auto* s = restored.getSceneStore().get (sc);
+    REQUIRE (s != nullptr);
+
+    CHECK (s->beats == 3);
+    CHECK (s->divisions == 6);
+    CHECK_THAT (s->swing, WithinAbs (0.37f, 1.0e-4f));
+    CHECK (s->lanes[5].numBlocks == 1);
+    CHECK (s->lanes[7].mute);
+    CHECK (s->lanes[5].solo);
+    CHECK (s->releaseMode == ReleaseMode::Latch);
+    CHECK_THAT (s->lanes[0].params[1], WithinAbs (0.66f, 1.0e-4f));
+
+    CHECK (restored.getGestureEngine().getPlayMode() == PlayMode::Midi);
+    CHECK (restored.getGestureEngine().isSceneLocked());
+    CHECK_THAT (restored.getGestureEngine().getTriggerQuantize(), WithinAbs (0.5, 1.0e-9));
+}
