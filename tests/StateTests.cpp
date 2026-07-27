@@ -663,6 +663,7 @@ TEST_CASE ("Every editable field survives save and reload", "[state][roundtrip]"
     const auto decayId = ID::lanePrefix (0) + ID::stutterDecay;
     const auto& range = proc.getAPVTS().getParameterRange (decayId);
     proc.getAPVTS().getParameter (decayId)->setValueNotifyingHost (range.convertTo0to1 (0.66f));
+    proc.pumpSceneMirror();   // parameter writes are deferred to the timer; flush them
 
     proc.getGestureEngine().setPlayMode (PlayMode::Midi);
     proc.getGestureEngine().setSceneLock (true);

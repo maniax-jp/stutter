@@ -85,7 +85,10 @@ StutterAudioProcessor::StutterAudioProcessor()
         }
     }
 
-    startTimerHz (2);
+    // 20Hz rather than 2Hz: this timer now also flushes knob edits into the scene, and a
+    // half-second lag between releasing a knob and the value being saved is long enough to
+    // lose an edit to a scene change. Each tick is two atomic loads when nothing changed.
+    startTimerHz (20);
 }
 
 StutterAudioProcessor::~StutterAudioProcessor()
@@ -683,6 +686,11 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 void StutterAudioProcessor::timerCallback()
 {
     sceneStore.collectGarbage();
+
+    // Flush before mirroring, not after. The mirror overwrites APVTS from the scene, so a
+    // pending edit that had not reached the scene yet would be silently replaced by the old
+    // value -- the very loss this write-back exists to prevent.
+    flushPendingLaneParamWrites();
     mirrorActiveSceneToApvts();
 }
 
@@ -748,9 +756,12 @@ void StutterAudioProcessor::mirrorActiveSceneToApvts()
     mirroredScene = scene;
 }
 
-void StutterAudioProcessor::writeLaneParamToScene (int lane, int paramIndex, float value)
+void StutterAudioProcessor::flushPendingLaneParamWrites()
 {
     if (sceneDocument == nullptr || suppressParamWriteback)
+        return;
+
+    if (! laneParamsDirty.exchange (false, std::memory_order_acquire))
         return;
 
     // Write to the scene the mirror was last filled from, not to whatever is active now. A
@@ -764,38 +775,56 @@ void StutterAudioProcessor::writeLaneParamToScene (int lane, int paramIndex, flo
         return;
 
     auto laneParams = sceneTree.getOrCreateChildWithName (stutter::SceneIDs::laneParams, nullptr);
+    bool wroteAnything = false;
 
-    juce::ValueTree laneNode;
-    for (int i = 0; i < laneParams.getNumChildren(); ++i)
-        if ((int) laneParams.getChild (i).getProperty (stutter::SceneIDs::index, -1) == lane)
-            laneNode = laneParams.getChild (i);
-
-    if (! laneNode.isValid())
+    for (auto& w : laneParamWritebacks)
     {
-        laneNode = juce::ValueTree (stutter::SceneIDs::lane);
-        laneNode.setProperty (stutter::SceneIDs::index, lane, nullptr);
-        laneParams.appendChild (laneNode, nullptr);
-    }
+        if (! w->dirty.exchange (false, std::memory_order_acquire))
+            continue;
 
-    for (int i = 0; i < laneNode.getNumChildren(); ++i)
-    {
-        auto pt = laneNode.getChild (i);
-        if (pt.hasType (stutter::SceneIDs::param)
-            && (int) pt.getProperty (stutter::SceneIDs::paramIndexProp, -1) == paramIndex)
+        const float value = w->pending.load (std::memory_order_relaxed);
+
+        juce::ValueTree laneNode;
+        for (int i = 0; i < laneParams.getNumChildren(); ++i)
+            if ((int) laneParams.getChild (i).getProperty (stutter::SceneIDs::index, -1) == w->lane)
+                laneNode = laneParams.getChild (i);
+
+        if (! laneNode.isValid())
         {
-            // No undo entry: knob drags emit a continuous stream of these, and one history
-            // step per pixel would make undo useless for everything else.
-            pt.setProperty (stutter::SceneIDs::value, value, nullptr);
-            sceneDocument->publish();
-            return;
+            laneNode = juce::ValueTree (stutter::SceneIDs::lane);
+            laneNode.setProperty (stutter::SceneIDs::index, w->lane, nullptr);
+            laneParams.appendChild (laneNode, nullptr);
         }
+
+        juce::ValueTree slot;
+        for (int i = 0; i < laneNode.getNumChildren(); ++i)
+        {
+            const auto pt = laneNode.getChild (i);
+            if (pt.hasType (stutter::SceneIDs::param)
+                && (int) pt.getProperty (stutter::SceneIDs::paramIndexProp, -1) == w->paramIndex)
+            {
+                slot = pt;
+                break;
+            }
+        }
+
+        if (! slot.isValid())
+        {
+            slot = juce::ValueTree (stutter::SceneIDs::param);
+            slot.setProperty (stutter::SceneIDs::paramIndexProp, w->paramIndex, nullptr);
+            laneNode.appendChild (slot, nullptr);
+        }
+
+        // No undo entry: knob drags emit a continuous stream of these, and one history step
+        // per pixel would make undo useless for everything else.
+        slot.setProperty (stutter::SceneIDs::value, value, nullptr);
+        wroteAnything = true;
     }
 
-    juce::ValueTree pt (stutter::SceneIDs::param);
-    pt.setProperty (stutter::SceneIDs::paramIndexProp, paramIndex, nullptr);
-    pt.setProperty (stutter::SceneIDs::value, value, nullptr);
-    laneNode.appendChild (pt, nullptr);
-    sceneDocument->publish();
+    // One republish for the whole batch. Publishing per parameter rebuilt the entire bank
+    // once per changed value, which is what made a sweep across every lane unusable.
+    if (wroteAnything)
+        sceneDocument->publish();
 }
 
 void StutterAudioProcessor::loadInitState()

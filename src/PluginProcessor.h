@@ -97,10 +97,9 @@ private:
         write-back listener must be suppressed while it runs. */
     void mirrorActiveSceneToApvts();
 
-    /** Write one lane parameter back into the scene it belongs to.
-        APVTS is only a mirror: without this a knob edit lives in the mirror alone and is
-        overwritten the next time a scene change refills it, so the edit disappears. */
-    void writeLaneParamToScene (int lane, int paramIndex, float value);
+    /** Flush parameter edits that arrived since the last call into their scene.
+        Message thread only; driven by the processor's timer. */
+    void flushPendingLaneParamWrites();
 
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
@@ -145,7 +144,7 @@ public:
     /** Run one mirror pass immediately. The shipping path is the processor's timer; this is
         exposed so the offline harness can drive it deterministically rather than depending
         on message-loop scheduling. */
-    void pumpSceneMirror() { mirrorActiveSceneToApvts(); }
+    void pumpSceneMirror() { flushPendingLaneParamWrites(); mirrorActiveSceneToApvts(); }
 
     /** Current division for the block grid's playhead, or -1 when idle. */
     int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
@@ -182,7 +181,13 @@ private:
     double frozenPpq = -1.0;
 
     /** One per lane parameter, so the callback already knows which lane and slot it is for
-        rather than parsing "lane3_decay" back apart on every knob move. */
+        rather than parsing "lane3_decay" back apart on every knob move.
+
+        parameterChanged fires on whatever thread set the parameter -- the audio thread for
+        host automation, and several threads at once under a validator. So it only records
+        the value; the scene write happens on the timer. Doing the write here mutated a
+        ValueTree and rebuilt the whole bank from arbitrary threads, which deadlocked
+        pluginval's parameter thread-safety test. */
     struct LaneParamWriteback : juce::AudioProcessorValueTreeState::Listener
     {
         LaneParamWriteback (StutterAudioProcessor& p, int l, int idx, juce::String id)
@@ -190,15 +195,24 @@ private:
 
         void parameterChanged (const juce::String&, float newValue) override
         {
-            owner.writeLaneParamToScene (lane, paramIndex, newValue);
+            pending.store (newValue, std::memory_order_relaxed);
+            dirty.store (true, std::memory_order_release);
+            owner.laneParamsDirty.store (true, std::memory_order_release);
         }
 
         StutterAudioProcessor& owner;
         int lane, paramIndex;
         juce::String paramID;   // kept so detaching does not have to re-derive it
+
+        std::atomic<float> pending { 0.0f };
+        std::atomic<bool> dirty { false };
     };
 
     std::vector<std::unique_ptr<LaneParamWriteback>> laneParamWritebacks;
+
+    /** Set by any writeback listener, cleared by the timer. Lets the common case -- nothing
+        touched a parameter since the last tick -- cost one atomic load instead of a scan. */
+    std::atomic<bool> laneParamsDirty { false };
 
     juce::UndoManager undoManager;
     std::unique_ptr<stutter::SceneDocument> sceneDocument;

@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "TestHelpers.h"
+#include <thread>
 #include "PresetManager.h"
 #include "FactoryScenes.h"
 #include "ui/SceneBrowser.h"
@@ -887,6 +888,11 @@ TEST_CASE ("A lane knob edit survives a scene round-trip", "[processor][mirror]"
     const auto& range = proc.getAPVTS().getParameterRange (id);
     param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
 
+    // Writes are deferred to the timer: parameterChanged fires on whatever thread set the
+    // parameter, so it only records the value. pumpSceneMirror drives the same flush the
+    // timer does.
+    proc.pumpSceneMirror();
+
     // The edit must reach the scene, not just the mirror.
     const auto* stored = proc.getSceneStore().get (60);
     REQUIRE (stored != nullptr);
@@ -920,10 +926,12 @@ TEST_CASE ("Editing one scene's knob does not leak into another", "[processor][m
     proc.getGestureEngine().setActiveScene (60);
     proc.pumpSceneMirror();
     param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+    proc.pumpSceneMirror();   // flush into scene 60 before the scene changes
 
     proc.getGestureEngine().setActiveScene (61);
     proc.pumpSceneMirror();
     param->setValueNotifyingHost (range.convertTo0to1 (0.20f));
+    proc.pumpSceneMirror();
 
     const auto* a = proc.getSceneStore().get (60);
     const auto* b = proc.getSceneStore().get (61);
@@ -1070,4 +1078,81 @@ TEST_CASE ("Stick freezes the pattern where Latch keeps it running", "[processor
     CHECK (stick > 1.0e-6);
     CHECK (latch > 1.0e-6);
     CHECK (std::abs (stick - latch) > latch * 0.01);
+}
+
+TEST_CASE ("Parameter changes from many threads stay safe", "[processor][mirror][threads]")
+{
+    // This is what pluginval's "Parameter thread safety" test does, and it deadlocked the
+    // first version of the write-back: parameterChanged fires on whatever thread set the
+    // parameter, and that handler mutated a ValueTree and rebuilt the whole scene bank.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    proc.getSceneDocument().ensureScene (60);
+    proc.getSceneDocument().publish();
+    proc.getGestureEngine().setActiveScene (60);
+    proc.pumpSceneMirror();
+
+    std::vector<juce::RangedAudioParameter*> params;
+    for (auto* p : proc.getParameters())
+        if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (p))
+            if (r->paramID.startsWith ("lane"))
+                params.push_back (r);
+    REQUIRE (params.size() > 8);
+
+    std::atomic<bool> go { false };
+    std::atomic<int> done { 0 };
+    constexpr int numThreads = 4;
+    constexpr int iterations = 400;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < numThreads; ++t)
+        threads.emplace_back ([&, t]
+        {
+            while (! go.load (std::memory_order_acquire)) {}
+            juce::Random rng (t + 1);
+            for (int i = 0; i < iterations; ++i)
+            {
+                auto* p = params[(size_t) rng.nextInt ((int) params.size())];
+                p->setValueNotifyingHost (rng.nextFloat());
+            }
+            done.fetch_add (1, std::memory_order_release);
+        });
+
+    go.store (true, std::memory_order_release);
+
+    // Drive the flush concurrently, as the message thread would, while audio also runs.
+    juce::AudioBuffer<float> buf (2, stutter::test::blockSize);
+    juce::MidiBuffer midi;
+    const auto started = juce::Time::getMillisecondCounter();
+
+    while (done.load (std::memory_order_acquire) < numThreads)
+    {
+        stutter::test::fillTestSignal (buf);
+        proc.processBlock (buf, midi);
+        proc.pumpSceneMirror();
+
+        if (juce::Time::getMillisecondCounter() - started > 20000)
+            break;   // do not hang the suite; the elapsed check below reports it
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    // Bound the wall time rather than only checking it finished. Publishing per parameter
+    // change -- the original defect -- rebuilds the whole bank on every one of these writes,
+    // which is what made pluginval's equivalent test time out at 30s. 1600 writes should
+    // take well under a second.
+    const auto elapsed = juce::Time::getMillisecondCounter() - started;
+    INFO ("elapsed " << elapsed << " ms for " << (numThreads * iterations) << " parameter writes");
+    CHECK (elapsed < 5000);
+
+    proc.pumpSceneMirror();
+
+    // Whatever the threads raced to, the scene must hold values that came from a parameter
+    // rather than torn or out-of-range data.
+    const auto* s = proc.getSceneStore().get (60);
+    REQUIRE (s != nullptr);
+    for (int l = 0; l < stutter::maxLanes; ++l)
+        for (int p = 0; p < stutter::maxParamsPerLane; ++p)
+            CHECK (std::isfinite (s->lanes[(size_t) l].params[(size_t) p]));
 }
