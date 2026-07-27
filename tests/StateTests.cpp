@@ -400,3 +400,89 @@ TEST_CASE ("Every factory bank parses and bakes", "[presets]")
         CHECK (withBlocks > 0);
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Host state round-trip. A DAW saves via getStateInformation and restores via
+// setStateInformation; anything the pair drops is work the user silently loses when they
+// reopen the project.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE ("Scene work survives a host save/restore round-trip", "[state][roundtrip]")
+{
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+
+    auto& doc = proc.getSceneDocument();
+    doc.replaceState (FactoryScenes::createBank (0));
+
+    // What the user should get back.
+    int expectedPopulated = 0, expectedBlocks = 0;
+    for (int i = 0; i < maxScenes; ++i)
+        if (const auto* s = proc.getSceneStore().get (i))
+            if (s->populated)
+            {
+                ++expectedPopulated;
+                for (int l = 0; l < maxLanes; ++l)
+                    expectedBlocks += s->lanes[(size_t) l].numBlocks;
+            }
+
+    REQUIRE (expectedPopulated > 0);
+    REQUIRE (expectedBlocks > 0);
+
+    juce::MemoryBlock saved;
+    proc.getStateInformation (saved);
+
+    // A fresh instance is the honest test: reusing the same object can pass on residue
+    // that was never in the saved bytes at all.
+    StutterAudioProcessor restored;
+    restored.prepareToPlay (48000.0, 512);
+    restored.setStateInformation (saved.getData(), (int) saved.getSize());
+
+    int gotPopulated = 0, gotBlocks = 0;
+    for (int i = 0; i < maxScenes; ++i)
+        if (const auto* s = restored.getSceneStore().get (i))
+            if (s->populated)
+            {
+                ++gotPopulated;
+                for (int l = 0; l < maxLanes; ++l)
+                    gotBlocks += s->lanes[(size_t) l].numBlocks;
+            }
+
+    CHECK (gotPopulated == expectedPopulated);
+    CHECK (gotBlocks == expectedBlocks);
+
+    // Counts alone are too weak. The bug this test was written for moved every block to
+    // lane 0 and reset the geometry to defaults; a scene with one block in one lane still
+    // "counted" correctly while playing something entirely different. Compare the fields
+    // that decide what is heard.
+    for (int i = 0; i < maxScenes; ++i)
+    {
+        const auto* a = proc.getSceneStore().get (i);
+        const auto* b = restored.getSceneStore().get (i);
+        REQUIRE (a != nullptr);
+        REQUIRE (b != nullptr);
+        if (! a->populated)
+            continue;
+
+        INFO ("scene " << i);
+        CHECK (b->populated);
+        CHECK (b->beats == a->beats);
+        CHECK (b->divisions == a->divisions);
+        CHECK (b->seed == a->seed);
+
+        for (int l = 0; l < maxLanes; ++l)
+        {
+            const auto& la = a->lanes[(size_t) l];
+            const auto& lb = b->lanes[(size_t) l];
+            INFO ("lane " << l);
+            REQUIRE (lb.numBlocks == la.numBlocks);
+            for (int k = 0; k < la.numBlocks; ++k)
+            {
+                CHECK (lb.blocks[(size_t) k].startDiv  == la.blocks[(size_t) k].startDiv);
+                CHECK (lb.blocks[(size_t) k].lengthDiv == la.blocks[(size_t) k].lengthDiv);
+            }
+            for (int p = 0; p < maxParamsPerLane; ++p)
+                CHECK_THAT (lb.params[(size_t) p], WithinAbs (la.params[(size_t) p], 1.0e-6));
+        }
+    }
+}

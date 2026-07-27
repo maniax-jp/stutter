@@ -25,10 +25,23 @@ static float clamp (float v, float lo, float hi) noexcept
 }
 
 // Helper: read an int property with a default.
+//
+// Accepts strings as well as numbers, and that is not defensive padding: juce::ValueTree's
+// XML round-trip stores every property as an attribute and reads it back as a *string*, so
+// an int written in memory returns as "16" after a host save/reload. Testing only isInt()
+// therefore made every integer in a saved scene -- lane, start, length, beats, divisions --
+// silently revert to its default, which read as "the blocks moved to lane 0 and overlapped"
+// rather than as a parse failure.
 static int getPropInt (const juce::ValueTree& tree, const juce::Identifier& id, int def)
 {
     const auto v = tree.getProperty (id, juce::var (def));
-    if (v.isInt()) return static_cast<int> (v);
+    if (v.isInt() || v.isInt64() || v.isDouble()) return static_cast<int> (v);
+    if (v.isString())
+    {
+        const auto s = v.toString().trim();
+        if (s.containsOnly ("0123456789+-") && s.isNotEmpty())
+            return s.getIntValue();
+    }
     return def;
 }
 
@@ -42,6 +55,13 @@ static float getPropFloat (const juce::ValueTree& tree, const juce::Identifier& 
 {
     const auto v = tree.getProperty (id, juce::var (def));
     if (v.isDouble() || v.isInt() || v.isInt64()) return static_cast<float> (v);
+    // Strings arrive after an XML round-trip; see getPropInt.
+    if (v.isString())
+    {
+        const auto s = v.toString().trim();
+        if (s.containsOnly ("0123456789+-.eE") && s.isNotEmpty())
+            return static_cast<float> (s.getDoubleValue());
+    }
     return def;
 }
 
@@ -49,7 +69,15 @@ static float getPropFloat (const juce::ValueTree& tree, const juce::Identifier& 
 static bool getPropBool (const juce::ValueTree& tree, const juce::Identifier& id, bool def)
 {
     const auto v = tree.getProperty (id, juce::var (def));
-    if (v.isBool()) return static_cast<bool> (v);
+    if (v.isBool() || v.isInt() || v.isInt64()) return static_cast<bool> (v);
+    // Strings arrive after an XML round-trip; see getPropInt. JUCE writes bools as "1"/"0",
+    // so accept those spellings as well as the textual ones.
+    if (v.isString())
+    {
+        const auto s = v.toString().trim().toLowerCase();
+        if (s == "1" || s == "true")  return true;
+        if (s == "0" || s == "false") return false;
+    }
     return def;
 }
 

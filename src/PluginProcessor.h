@@ -130,6 +130,11 @@ public:
     /** The editable scene tree the UI mutates. Baked into SceneStore on publish(). */
     stutter::SceneDocument& getSceneDocument() noexcept { return *sceneDocument; }
 
+    /** The baked bank the audio thread reads. Exposed read-only so tests can assert on what
+        actually reached the audio path, rather than on the document that was supposed to
+        produce it -- the two disagreeing is precisely the failure worth catching. */
+    const stutter::SceneStore& getSceneStore() const noexcept { return sceneStore; }
+
     juce::UndoManager& getUndoManager() noexcept { return undoManager; }
 
     /** Run one mirror pass immediately. The shipping path is the processor's timer; this is

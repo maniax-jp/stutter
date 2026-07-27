@@ -489,8 +489,15 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // Write v2 schema version so setStateInformation can distinguish from v1 state.
     state.setProperty (stutter::SceneIDs::version, stutter::stateSchemaVersion, nullptr);
 
-    // Attach structural (non-parameter) data: step grid + curves
+    // Attach structural (non-parameter) data: scenes + curves.
     state.removeChild (state.getChildWithName (ID::curvesNode), nullptr);
+    state.removeChild (state.getChildWithName (stutter::SceneIDs::scenesNode), nullptr);
+
+    // The scene document is the authority here, not the store: the store holds the last
+    // *published* bank, so saving from it would silently drop edits made since the last
+    // publish. setStateInformation feeds this same node straight back to the store.
+    if (sceneDocument != nullptr)
+        state.appendChild (sceneDocument->getState().createCopy(), nullptr);
 
 
     juce::ValueTree curvesTree (ID::curvesNode);
@@ -530,8 +537,14 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
     if (scenesNode.isValid())
     {
-        // v2 state with <Scenes> node: feed to SceneStore.
-        sceneStore.rebuildFromTree (scenesNode);
+        // Restore through the document, which republishes to the store. Loading the store
+        // directly would leave the editor's tree empty, so the grid would show nothing while
+        // the audio path played the restored scenes, and the next UI edit would overwrite
+        // them from that empty tree.
+        if (sceneDocument != nullptr)
+            sceneDocument->replaceState (scenesNode);
+        else
+            sceneStore.rebuildFromTree (scenesNode);
     }
 
     // The v1 Curves node is still read: the three global curve modulators
@@ -660,6 +673,17 @@ void StutterAudioProcessor::loadInitState()
     // ID::neutralValueForCurve) -- the same path Test C exercises for malformed state.
     for (size_t i = 0; i < curves.size(); ++i)
         curves[i].fromValueTree (juce::ValueTree {});
+
+    // Scenes are structural, so resetting parameters does not touch them. Without this an
+    // Init -- including the fallback taken when a state load is rejected -- would leave the
+    // previous session's blocks playing under a patch claiming to be empty.
+    if (sceneDocument != nullptr)
+    {
+        juce::ValueTree empty (stutter::SceneIDs::scenesNode);
+        sceneDocument->replaceState (empty);
+        sceneDocument->ensureScene (0);
+        sceneDocument->publish();
+    }
 }
 
 //==============================================================================
