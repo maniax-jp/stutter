@@ -29,7 +29,10 @@ public:
         : store (storeToFill), undoManager (undoManagerToUse)
     {
         state = juce::ValueTree (SceneIDs::scenesNode);
-        ensureScene (0);
+        // Seed the scene the plugin actually opens on, not slot 0. The sceneSelect parameter
+        // defaults to defaultSceneIndex and the audio path follows it, so seeding a different
+        // slot would leave a fresh instance pointing at a scene that does not exist.
+        ensureScene (defaultSceneIndex);
         publish();
     }
 

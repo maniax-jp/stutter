@@ -9,25 +9,23 @@ namespace stutter::ui
 {
 
 /**
-    Keyboard strip showing which notes map to which scenes.
+    Strip of scene slots: which are built, which is being edited, which is being heard.
 
-    Drawn rather than built on juce::MidiKeyboardComponent, because the thing being shown is
-    scene occupancy, not a playable keyboard: each key needs an occupied/empty state, the
-    active scene highlighted live from the audio thread, and a click that selects for editing
-    rather than sounds a note.
+    Two highlights, and they mean different things. *Playing* follows the Scene parameter, so
+    it moves on its own while automation runs; *selected* is what the editor below is showing
+    and only moves when clicked. Keeping them separate is what lets someone edit one scene
+    while the timeline plays another, and playing outranks selected visually because during
+    playback the scene you are hearing is the one you need to find.
 
-    Only two octaves are visible at a time. All 128 scenes exist, but a strip showing them
-    all would give each key about four pixels, and in practice a bank occupies a handful of
-    adjacent notes -- Stutter Edit 2 has the same problem and solves it the same way, with a
-    scrollable window over the full range.
+    Only 24 slots are visible at a time. All 128 exist, but a strip showing them all would give
+    each about four pixels, and in practice a bank occupies a handful of adjacent slots.
 */
 class SceneBrowser : public juce::Component, private juce::Timer
 {
 public:
-    /** The scene the browser opens on: C4, the bottom of the visible keyboard. Factory content
-        targets this so a freshly loaded preset is visible in the grid rather than sitting on a
-        scene the editor is not showing. */
-    static constexpr int defaultScene = 60;
+    /** The scene the browser opens on. Shared with the sceneSelect parameter's default so the
+        browser cannot open showing a scene other than the one being heard. */
+    static constexpr int defaultScene = defaultSceneIndex;
 
     SceneBrowser (StutterAudioProcessor& processor, SceneDocument& document);
     ~SceneBrowser() override;
@@ -47,23 +45,22 @@ public:
 private:
     void timerCallback() override;
 
-    /** Note under a point, or -1. */
-    int noteAtPoint (juce::Point<int> p) const;
-    juce::Rectangle<float> getKeyBounds (int note) const;
-    bool isBlackKey (int note) const;
+    /** Scene under a point, or -1. */
+    int sceneAtPoint (juce::Point<int> p) const;
+    juce::Rectangle<float> getCellBounds (int sceneIndex) const;
     bool sceneHasContent (int sceneIndex) const;
 
     StutterAudioProcessor& proc;
     SceneDocument& doc;
 
     int selectedScene = defaultScene;
-    int hoveredNote = -1;
+    int hoveredScene = -1;
     int lastActiveScene = -1;
 
-    /** Lowest visible note. C4 by default, so the default 1:1 mapping puts middle C at the
-        left edge and the factory Playable Set lands in view. */
-    int firstVisibleNote = 60;
-    static constexpr int visibleNotes = 24;   // two octaves
+    /** Leftmost visible slot. Starts at the default scene so a freshly loaded factory bank,
+        which targets that slot and the ones just above it, opens in view. */
+    int firstVisibleScene = defaultScene;
+    static constexpr int visibleScenes = 24;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SceneBrowser)
 };

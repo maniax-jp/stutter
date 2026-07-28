@@ -5,7 +5,7 @@
 
 #include "dsp/CaptureBuffer.h"
 #include "dsp/CurveModulator.h"
-#include "dsp/GestureEngine.h"
+#include "dsp/SceneSelector.h"
 #include "dsp/ParameterIDs.h"
 #include "PresetManager.h"
 #include "state/SceneStore.h"
@@ -104,7 +104,7 @@ private:
     /** Processes one chunk (<= dryScratchBuffer's capacity) through the full transport/sequencer/
         modulator/dry-wet chain. See processBlock() for why blocks larger than that capacity are
         split into successive calls to this. */
-    void processChunk (juce::AudioBuffer<float>& chunk, const juce::MidiBuffer& chunkMidi);
+    void processChunk (juce::AudioBuffer<float>& chunk);
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -127,9 +127,9 @@ private:
 
     // v2 scene store and scalar param overlay
 public:
-    /** The MIDI gesture layer. Exposed so the editor can drive Play Mode / Scene Lock and so
-        the offline harness can verify note handling end to end. */
-    stutter::GestureEngine& getGestureEngine() noexcept { return gestureEngine; }
+    /** Scene selection and the wet gate. Exposed so the editor can show which scene is
+        actually playing, and so tests can assert on it end to end. */
+    stutter::SceneSelector& getSceneSelector() noexcept { return sceneSelector; }
 
     /** The editable scene tree the UI mutates. Baked into SceneStore on publish(). */
     stutter::SceneDocument& getSceneDocument() noexcept { return *sceneDocument; }
@@ -159,9 +159,9 @@ private:
     stutter::SceneStore sceneStore;
     stutter::LiveParamOverlay paramOverlay;
 
-    // Consumes MIDI and produces the wet-path gate. Sits ahead of the sequencer in
-    // processChunk so a note can change the active scene before that chunk is rendered.
-    stutter::GestureEngine gestureEngine;
+    // Holds the automated scene selection and produces the wet-path gate. Polled ahead of the
+    // sequencer in processChunk so a change takes effect on the chunk it belongs to.
+    stutter::SceneSelector sceneSelector;
 
     // The sequencer. Drives the audio path and owns the playhead the block grid renders.
     stutter::BlockSequencer blockSequencer;
@@ -177,35 +177,62 @@ private:
     /** Which scene APVTS currently reflects; -1 before the first mirror. */
     int mirroredScene = -1;
 
-    /** PPQ the pattern was pinned at by a Stick release; -1 when not frozen. Audio thread. */
-    double frozenPpq = -1.0;
-
     /** One per lane parameter, so the callback already knows which lane and slot it is for
         rather than parsing "lane3_decay" back apart on every knob move.
 
-        parameterChanged fires on whatever thread set the parameter -- the audio thread for
-        host automation, and several threads at once under a validator. So it only records
+        parameterValueChanged fires on whatever thread set the parameter -- the audio thread
+        for host automation, and several threads at once under a validator. So it only records
         the value; the scene write happens on the timer. Doing the write here mutated a
         ValueTree and rebuilt the whole bank from arbitrary threads, which deadlocked
-        pluginval's parameter thread-safety test. */
-    struct LaneParamWriteback : juce::AudioProcessorValueTreeState::Listener
-    {
-        LaneParamWriteback (StutterAudioProcessor& p, int l, int idx, juce::String id)
-            : owner (p), lane (l), paramIndex (idx), paramID (std::move (id)) {}
+        pluginval's parameter thread-safety test.
 
-        void parameterChanged (const juce::String&, float newValue) override
+        Only *gestured* changes are recorded. APVTS mirrors the active scene's lane values, so
+        a host replaying an automation lane writes the same parameters a knob does, and without
+        this distinction that playback would be baked into the scene document and made
+        permanent by the next project save. JUCE's Slider and ComboBox attachments always
+        bracket a drag in begin/endChangeGesture; automation playback never does. This listens
+        to the parameter rather than to APVTS because only the parameter reports gestures. */
+    struct LaneParamWriteback : juce::AudioProcessorParameter::Listener
+    {
+        LaneParamWriteback (StutterAudioProcessor& p, int l, int idx, juce::String id,
+                            juce::RangedAudioParameter& parameter)
+            : owner (p), lane (l), paramIndex (idx), paramID (std::move (id)), param (parameter) {}
+
+        void parameterValueChanged (int, float newNormalisedValue) override
         {
-            pending.store (newValue, std::memory_order_relaxed);
+            if (! inGesture.load (std::memory_order_acquire))
+                return;
+
+            // Denormalise here so the timer does not have to reach back into the parameter
+            // from the message thread while the audio thread may be writing it.
+            pending.store (param.convertFrom0to1 (newNormalisedValue), std::memory_order_relaxed);
             dirty.store (true, std::memory_order_release);
             owner.laneParamsDirty.store (true, std::memory_order_release);
+        }
+
+        void parameterGestureChanged (int, bool gestureIsStarting) override
+        {
+            inGesture.store (gestureIsStarting, std::memory_order_release);
+
+            // Catch the final value on release. A drag's last move can arrive before the
+            // end-gesture, but a click that jumps straight to a value emits no move at all --
+            // without this, such an edit would be dropped.
+            if (! gestureIsStarting)
+            {
+                pending.store (param.convertFrom0to1 (param.getValue()), std::memory_order_relaxed);
+                dirty.store (true, std::memory_order_release);
+                owner.laneParamsDirty.store (true, std::memory_order_release);
+            }
         }
 
         StutterAudioProcessor& owner;
         int lane, paramIndex;
         juce::String paramID;   // kept so detaching does not have to re-derive it
+        juce::RangedAudioParameter& param;
 
         std::atomic<float> pending { 0.0f };
         std::atomic<bool> dirty { false };
+        std::atomic<bool> inGesture { false };
     };
 
     std::vector<std::unique_ptr<LaneParamWriteback>> laneParamWritebacks;

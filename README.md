@@ -9,8 +9,8 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
 
 ## 機能
 
-- **MIDI ノートで切り替える 128 の Scene** — ブロック配置・全パラメータ・カーブを丸ごと
-  記憶したスナップショット。エフェクトを楽器のように演奏できる
+- **オートメーションで呼び出す 128 の Scene** — ブロック配置・全パラメータ・カーブを丸ごと
+  記憶したスナップショット。画面で組み上げ、DAW のオートメーションレーンから呼び出す
 - **12レーン × 可変長ブロックのシーケンサー** — Beats 1〜8 × Divisions 2〜8 と Swing。
   ブロックの「長さ」が音を決める(TapeStop が1小節かけて停止しきる、など)
   - Buffer系: Stutter / TapeStop / TapeStart / Reverse / Repitch / Stretcher / Shuffler
@@ -19,8 +19,9 @@ iZotope Stutter Edit 2 / Cableguys ShaperBox 3 / Xfer LFO Tool / Illformed Glitc
   - 切替は等パワークロスフェードでクリックレス
 - **ルーティング可能なモジュレーションマトリクス** — 任意のカーブを任意のレーン
   パラメータへ。加えて v1 由来の Volume / Filter / Pan の3系統
-- **MIDI 演奏レイヤー** — Play Mode(Auto / MIDI)、トリガークオンタイズ(早入力を許す)、
-  Release モード5種(Scene ごと)、Scene Lock
+- **オートメーション2本だけの制御面** — `Scene`(どれを呼び出すか)と `Active`(どこで
+  効かせるか)。グリッチは大半の小節で無効であるべきなので、有効区間を決めるのは
+  タイムラインの仕事。無効区間では原音がそのまま通る(無音にはならない)
 - **ファクトリーコンテンツ** — v2 Scene バンク4種(14シーン)+ v1 由来のプリセット28個。
   ユーザープリセットは `~/Library/Audio/Presets/Maniax/Stutter/`
 - カスタムダークUI(1200×800、比率固定リサイズ、発光プレイヘッド、ドラッグ描画グリッド)

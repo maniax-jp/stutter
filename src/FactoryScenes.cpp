@@ -90,20 +90,20 @@ juce::ValueTree makeHeldEnvelopesBank()
     juce::ValueTree bank (SceneIDs::scenesNode);
 
     {
-        auto s = makeScene (60, "Full Bar Brake", 4, 4, 0.0f, 1001);
+        auto s = makeScene (1, "Full Bar Brake", 4, 4, 0.0f, 1001);
         addBlock (s, lanes::tapeStop, 0, 16);      // one block across the whole bar
         setLaneParam (s, lanes::tapeStop, 0, 0.7f);  // curve: mostly exponential
         setLaneParam (s, lanes::tapeStop, 1, 0.9f);  // time: long
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (61, "Half Brake, Half Spin", 4, 4, 0.0f, 1002);
+        auto s = makeScene (2, "Half Brake, Half Spin", 4, 4, 0.0f, 1002);
         addBlock (s, lanes::tapeStop, 0, 8);
         addBlock (s, lanes::tapeStart, 8, 8);
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (62, "Slow Grind", 4, 4, 0.0f, 1003);
+        auto s = makeScene (3, "Slow Grind", 4, 4, 0.0f, 1003);
         addBlock (s, lanes::stretcher, 0, 16);
         setLaneParam (s, lanes::stretcher, 0, 0.25f);  // speed: quarter time
         setLaneParam (s, lanes::stretcher, 1, 0.12f);  // grain: long, less metallic
@@ -122,20 +122,20 @@ juce::ValueTree makeGrooveBank()
     juce::ValueTree bank (SceneIDs::scenesNode);
 
     {
-        auto s = makeScene (60, "Swung Sixteenths", 4, 4, 0.55f, 2001);
+        auto s = makeScene (1, "Swung Sixteenths", 4, 4, 0.55f, 2001);
         for (int d = 0; d < 16; d += 2)
             addBlock (s, lanes::gate, d, 1);
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (61, "Triplet Chop", 4, 3, 0.0f, 2002);
+        auto s = makeScene (2, "Triplet Chop", 4, 3, 0.0f, 2002);
         for (int d = 0; d < 12; d += 3)
             addBlock (s, lanes::stutterLane, d, 2);
         setLaneParam (s, lanes::stutterLane, 0, 2.0f);   // 1/64 in corrected labelling
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (62, "Five Over Four", 5, 4, 0.0f, 2003);
+        auto s = makeScene (3, "Five Over Four", 5, 4, 0.0f, 2003);
         for (int d = 0; d < 20; d += 5)
             addBlock (s, lanes::reverse, d, 2);
         bank.appendChild (s, nullptr);
@@ -152,7 +152,7 @@ juce::ValueTree makeModulationBank()
     juce::ValueTree bank (SceneIDs::scenesNode);
 
     {
-        auto s = makeScene (60, "Filter Sweep Hold", 4, 4, 0.0f, 3001);
+        auto s = makeScene (1, "Filter Sweep Hold", 4, 4, 0.0f, 3001);
         addBlock (s, lanes::filter, 0, 16);
         setLaneParam (s, lanes::filter, 0, 0.0f);    // lowpass
         setLaneParam (s, lanes::filter, 2, 0.6f);    // resonance
@@ -165,7 +165,7 @@ juce::ValueTree makeModulationBank()
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (61, "Crush Ramp", 4, 4, 0.0f, 3002);
+        auto s = makeScene (2, "Crush Ramp", 4, 4, 0.0f, 3002);
         addBlock (s, lanes::crush, 0, 16);
         addCurve (s, paramIndex (lanes::crush, 0), 1.0f, 2.0f,
                   { { 0.0f, 1.0f, 0.0f, PointWeight::Hard },
@@ -173,7 +173,7 @@ juce::ValueTree makeModulationBank()
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (62, "Drive Pulse", 4, 4, 0.0f, 3003);
+        auto s = makeScene (3, "Drive Pulse", 4, 4, 0.0f, 3003);
         addBlock (s, lanes::distort, 0, 16);
         setLaneParam (s, lanes::distort, 0, 2.0f);   // Fold
         addCurve (s, paramIndex (lanes::distort, 1), 1.0f, 4.0f,
@@ -187,40 +187,40 @@ juce::ValueTree makeModulationBank()
 
 // ---- Bank 3: Playable Set ----------------------------------------------------------------
 //
-// Laid out for performance: adjacent notes give escalating intensity, so a player can sweep
-// up the keyboard. This is the bank that demonstrates the MIDI layer.
+// Ordered by intensity and packed into slots 1-5, so automating Scene upward through the
+// set escalates rather than jumps around.
 juce::ValueTree makePlayableBank()
 {
     juce::ValueTree bank (SceneIDs::scenesNode);
 
     {
-        auto s = makeScene (60, "C - Light Gate", 4, 4, 0.0f, 4001);
+        auto s = makeScene (1, "Light Gate", 4, 4, 0.0f, 4001);
         for (int d = 0; d < 16; d += 4)
             addBlock (s, lanes::gate, d, 1);
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (62, "D - Stutter Roll", 4, 4, 0.0f, 4002);
+        auto s = makeScene (2, "Stutter Roll", 4, 4, 0.0f, 4002);
         addBlock (s, lanes::stutterLane, 8, 8);
         setLaneParam (s, lanes::stutterLane, 1, 0.6f);   // decay: shrink toward a roll
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (64, "E - Shuffle Chop", 4, 4, 0.0f, 4003);
+        auto s = makeScene (3, "Shuffle Chop", 4, 4, 0.0f, 4003);
         addBlock (s, lanes::shuffler, 0, 16);
         setLaneParam (s, lanes::shuffler, 2, 0.85f);  // shuffle chance
         setLaneParam (s, lanes::shuffler, 4, 0.4f);   // reverse chance
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (65, "F - Dub Throw", 4, 4, 0.0f, 4004);
+        auto s = makeScene (4, "Dub Throw", 4, 4, 0.0f, 4004);
         addBlock (s, lanes::delay, 0, 16);
         setLaneParam (s, lanes::delay, 1, 0.75f);  // feedback
         setLaneParam (s, lanes::delay, 4, 0.1f);   // slew: low, so the tail warps
         bank.appendChild (s, nullptr);
     }
     {
-        auto s = makeScene (67, "G - Total Collapse", 4, 4, 0.0f, 4005);
+        auto s = makeScene (5, "Total Collapse", 4, 4, 0.0f, 4005);
         addBlock (s, lanes::tapeStop, 0, 16);
         addBlock (s, lanes::distort, 0, 16);
         setLaneParam (s, lanes::distort, 1, 12.0f);

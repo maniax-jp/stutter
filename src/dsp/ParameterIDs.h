@@ -10,6 +10,14 @@ static const juce::String sequencerOn   = "sequencerOn";
 static const juce::String hostSync      = "hostSync";
 static const juce::String internalBpm   = "internalBpm";
 
+// ---- Automation-facing performance controls ----
+// The plugin is built in the editor and *called* from the host's automation lane: these two
+// are the entire interface for that. Scene picks which of the 128 built scenes plays; active
+// decides where it is heard. Nothing else about a scene is automatable, deliberately -- the
+// editor owns what a scene is, automation owns when it happens.
+static const juce::String sceneSelect   = "sceneSelect";
+static const juce::String active        = "active";
+
 // ---- Per-lane parameter prefix helper ----
 // Lane indices 0..7 map to: 0 Stutter, 1 TapeStop, 2 TapeStart, 3 Reverse,
 //                           4 Repitch, 5 Gate, 6 Filter, 7 Crush

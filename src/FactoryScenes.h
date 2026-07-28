@@ -10,7 +10,7 @@ namespace stutter
 
     These exist to demonstrate what the v1 grid could not express, so each one is chosen for
     a capability rather than for a sound: variable-length blocks that let an envelope
-    complete, MIDI-triggered scene switching, a curve routed to an arbitrary parameter, and
+    complete, automated scene switching, a curve routed to an arbitrary parameter, and
     the seeded effects. A bank whose presets all sound different but exercise one code path
     would leave most of v2 unverified by anything a user actually loads.
 

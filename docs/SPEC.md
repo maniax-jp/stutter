@@ -1,8 +1,13 @@
 # Stutter v2 — Multi-FX Glitch Sequencer (VST3 / AU / Standalone, macOS)
 
-MIDI ノートで **Scene** を切り替えて演奏するマルチFXグリッチシーケンサー。
+**Scene** をホストのオートメーションから呼び出すマルチFXグリッチシーケンサー。
 可変長ブロックのパターン、任意パラメータへルーティング可能なモジュレーション、
 12レーンのエフェクトを持つ。
+
+**画面で組み、オートメーションで呼び出す**という責務分離が設計の軸。エフェクトの中身
+(レーン、ブロック、カーブ、パラメータ)はエディタが所有し、タイムラインが決めるのは
+「どの Scene を、どの区間で有効にするか」だけ。オートメーション対象は `sceneSelect` と
+`active` の2本のみで、これは意図的な制限である。
 
 本書は設計の意図と全体像を扱う。個々のクラスの詳細は各ヘッダの doc comment が一次情報
 であり、そちらのほうが常に新しい。
@@ -53,10 +58,13 @@ v2 の設計判断で最も重要なのは、**編集用の状態と再生用の
 ドラッグ中に毎回約10MBのバンクを再構築することになる。
 
 ただし**ノブのドラッグは現状この対策の外にある**。当初は `LiveParamOverlay`(lock-free)
-を通す設計だったが、実装ではノブ編集は APVTS リスナー経由で
-`writeLaneParamToScene` がシーンへ書き戻し、その都度 `publish()` している。
-`LiveParamOverlay` は宣言されているだけで使われていない。実測でこれが問題になっては
-いないが、SPEC の元の意図とは異なる。
+を通す設計だったが、実装ではノブ編集は `LaneParamWriteback`(パラメータのリスナー)が
+値を記録し、タイマーがシーンへ書き戻して `publish()` している。`LiveParamOverlay` は
+宣言されているだけで使われていない。実測でこれが問題になってはいないが、SPEC の元の
+意図とは異なる。
+
+リスナーが APVTS ではなく**パラメータ**に付いているのは gesture を受け取るため。
+詳細は「なぜ制御面が2本だけなのか」を参照。
 
 **退役キュー**: 差し替えられたバンクは即座に解放せず、時間ベースのキューに入れて
 メッセージスレッドのタイマーで回収する。参照カウントにするとオーディオスレッドの読み取り
@@ -74,8 +82,8 @@ v2 の設計判断で最も重要なのは、**編集用の状態と再生用の
      → グローバルカーブ(Volume/Filter/Pan) → ジェスチャゲート × Dry/Wet → 出力ゲイン
 ```
 
-`GestureEngine` はシーケンサーの**前**で MIDI を消費する。チャンク内で届いたノートが
-そのチャンクのレンダリング前に Scene を切り替えられるようにするため。
+`SceneSelector` はシーケンサーの**前**でオートメーションを読む。そのチャンクの
+レンダリング前に Scene が確定するようにするため(1チャンク遅れないように)。
 
 ### BlockSequencer
 
@@ -166,41 +174,60 @@ v1 はカーブ3本が Volume/Filter/Pan に固定配線だった。v2 は**任�
 取り違えると音で分かる: latched なものを continuous にするとジッパーノイズかクリック、
 continuous なものを latched にするとカーブを掛けても動かない。
 
-### GestureEngine
+### SceneSelector
 
-- **Play Mode**: Auto(常時オン、v1 相当)/ MIDI(ノートを押している間だけ wet)
+オートメーションから来る2つの値だけを持つ。**どの Scene が鳴るか**(`sceneSelect`)と、
+**それが聞こえるか**(`active`)。
+
+- **Scene は 1 始まり、0 は「未指定」。** ユーザーはブラウザで見た番号をオートメーション
+  レーンに手で打ち込むので、画面の番号とパラメータの値は同一でなければならない。人が
+  スロットを数えるときは 1 から始めるし、そうすると 0 が「未指定」用に空く — 書かれて
+  いないレーンは 0 を送ってくるので、それを「切り替えない」と解釈すれば、触っていない
+  レーンがエディタでの選択を奪わない。代償は配列1要素の無駄だけで、これが最も安い
+- 配列サイズは 128 のまま。スロット0は確保されるが使われない
+  (`firstSceneIndex` / `lastSceneIndex` / `noSceneIndex` を参照)
+- **`processChunk` でポーリングする。** `parameterChanged` リスナーは使わない。リスナーは
+  ホストが好きなスレッドで呼ぶため、そこから `activeScene` に触るとレンダリング途中で
+  Scene が変わりうる。ポーリングなら「そのチャンクの描画前に Scene が確定する」保証が
+  維持され、`getRawParameterValue` はロックフリーで済む
+- **値が変わったときだけミラーを立てる。** ホストは毎ブロック同じ値を再送するので、
+  無条件に立てるとミラーが回り続ける
 - **ゲートはシーケンサーのミュートではなく Dry/Wet ミックス上のランプ**。これにより
   遷移が構造的にクリックレスになる。実測で最大ステップ 0.004167(48kHz の5msランプが
-  意味する 1/240 と一致)
-- **ゲートを閉じると wet は silence ではなく dry に collapse する**。ノートを離したとき
-  素材が残るべきで、トラックに穴を開けるべきではない。副次的に、Auto モードでは
-  ゲートが 1.0 に留まりミックス式が v1 と同一の計算に退化する
-- **クオンタイズは早入力を許す**: 境界の半グリッド以内に早く到達したノートは、1グリッド
-  待つのではなくその境界で発火する。演奏者がビートを先取りできる(SE2 の意味論)
-- **Release モード5種**: OnGrid / FullGesture / Latch / Instant / Stick
-- **Scene Lock**: ノートを Scene 選択には使わずゲートにのみ使う。演奏中に別の Scene を
-  編集できる
-- 複数ノート保持時は**最後の1つを離したときだけ**ジェスチャが終わる
+  意味する 1/240 と一致)。`active` は Bool なのでブロック境界でステップ状に切り替わり、
+  ランプがなければ全てのエッジがクリックになる
+- **ゲートを閉じると wet は silence ではなく dry に collapse する**。無効区間では素材が
+  そのまま通るべきで、トラックに穴を開けるべきではない。グリッチが大半の小節で無効で
+  あることを前提とした設計なので、この性質は必須
 
-### これらがどこに保存されるか
+### なぜ制御面が2本だけなのか
 
-| 設定 | 格納先 | 理由 |
-|---|---|---|
-| Play Mode / Scene Lock / Quantize | state ツリーのルートプロパティ | セッション全体の設定であり、Scene ごとに変わるものではない |
-| Release モード | **Scene ごと** | 鍵盤ごとに離しかたを変えられることに意味がある(SE2 と同じ) |
+レーンパラメータ(cutoff 等)はオートメーション対象**ではない**。APVTS 上のレーン値は
+アクティブ Scene のミラーであって音の権威ではなく(`ParamIndex.h` 参照)、音声スレッドは
+`SceneStore` のスナップショットだけを読む。ホストがミラーを書いても音は変わらない。
 
-**いずれも APVTS パラメータにしていない。** これらは連続値ではなくモード切替であり、
-Play Mode をフレーズ途中でオートメーションされると「ノートが鳴るかどうか」自体が
-変わる。誰も要求していない挙動をホストが作り出せてしまうため、意図的に自動化対象から
-外している。
+その代わり、**ホストのオートメーション書き込みが Scene 文書を汚染しないようにしている**。
+`LaneParamWriteback` は `beginChangeGesture`/`endChangeGesture` に挟まれた変更だけを
+「ユーザー編集」として扱う。JUCE の Slider/ComboBox アタッチメントは必ずドラッグを
+gesture で囲み、オートメーション再生は決して囲まないため、この一点で両者を区別できる。
+これがないと、オートメーションを再生するだけで Scene が書き換わり、プロジェクト保存時に
+恒久化してしまう。
 
-そのため APVTS が運んでくれず、`getStateInformation` が明示的に書く必要がある。
-`loadInitState` でも明示的に Auto へ戻す — MIDI モードはノートが来るまで無音なので、
-前のパッチから引き継ぐと「プラグインが壊れている」ようにしか見えない。
+### 保存先
 
-**ノート → Scene のマッピングは現状 identity 固定。** `setNoteMapping` は実装済みだが
-プロセッサは `setIdentityMapping()` しか呼んでおらず、任意の鍵盤に任意の Scene を
-割り当てる UI はまだない。
+| 設定 | 格納先 |
+|---|---|
+| `sceneSelect` / `active` | APVTS パラメータ(= ホストが保存し、オートメーションできる) |
+| `activeScene` | state ツリーのルートプロパティ(復元時の着地点) |
+| Release モード | Scene ごと(退役。enum は互換のため残置) |
+
+`setStateInformation` には順序上の罠がある。`apvts.replaceState()` は `sceneSelect` を
+既定値に戻すため、その**後**に復元済みの Scene を書き戻さないと、次のブロックの
+ポーリングが既定値で上書きしてしまい、旧セッションが常に既定 Scene で開く。
+
+**スキーマバージョンは上げていない。** 今回消えたのはルートプロパティ3つ
+(`playMode` / `sceneLock` / `triggerQuantize`)だけで、他の構造は不変。バージョンを
+上げると既存の v2 プロジェクトが全て Init に落ちる。読み捨てで安全に開ける。
 
 ---
 
@@ -287,13 +314,19 @@ v1 はパラメータ定義が3箇所(`ParameterIDs.h` の ID、`ParameterLayout
 | 領域 | 内容 |
 |---|---|
 | ヘッダ | ロゴ、プリセットブラウザ、Dry/Wet、Output、SEQ/SYNC トグル、BPM |
-| Scene ストリップ | 鍵盤表示。どのノートに Scene があるか、どれが鳴っているか、どれを編集中か |
-| 演奏バー | Play Mode / Quantize / Release / Grid(Beats×Divisions)/ Swing / Scene Lock |
+| Scene ストリップ | Scene スロット一覧。どこに中身があるか、どれが鳴っているか、どれを編集中か |
+| 演奏バー | ACTIVE / Grid(Beats×Divisions)/ Swing |
 | ブロックグリッド | 12レーン × 可変 division。可変長ブロックの描画・編集、発光プレイヘッド |
 | 下部タブ | LANE(選択レーンのパラメータ)/ VOLUME / FILTER / PAN(カーブ)/ MOD(ルーティング表) |
 
-演奏バーがヘッダではなく鍵盤の直下にあるのは、これらが「ノートを弾いたときに何が
-起きるか」を決める設定であり、判断している最中にユーザーが見ているのが鍵盤だから。
+ストリップの **playing / selected は別物**。playing は `sceneSelect` に追従するので
+オートメーション中に勝手に動き、selected はクリックしたときだけ動く。分けてあるのは
+「タイムラインが別の Scene を鳴らしている間に、手元で1つを編集する」ができるようにする
+ため。再生中はどれが聞こえているかのほうが重要なので、playing が視覚的に優先される。
+
+ACTIVE は**コントロールであると同時に読み取り値**でもある。自前のトグル状態ではなく
+パラメータを描画し、30Hz のタイマーで再描画する — ButtonAttachment の更新は
+`AsyncUpdater` 経由なので、速いオートメーションのエッジは中間状態が消えうる。
 
 ### BlockGrid のマウス操作(Glitch 2 由来)
 
@@ -334,7 +367,7 @@ v1 はパラメータ定義が3箇所(`ParameterIDs.h` の ID、`ParameterLayout
 | Held Envelopes | 1小節を跨ぐブロックで TapeStop が実際に停止に到達する |
 | Swing & Odd Grids | Beats×Divisions と Swing(4×3、5×4) |
 | Routed Modulation | カーブがレーンパラメータを直接駆動する |
-| Playable Set | C/D/E/F/G に強度順で配置、MIDI 演奏用 |
+| Playable Set | 強度順に並べた5 Scene。Scene オートメーションを昇順に動かすと激しくなる |
 
 **v1 プリセット**(`src/FactoryPresets.cpp`、29個)も残っており、`PresetManager` 経由で
 ロードできる。ただし内容はロード時に v2 へ変換される: v1 の 16 ステップは
@@ -410,9 +443,9 @@ Core Audio の AU 登録は壊れることがあり、その状態では `auval 
 `validate.sh` はこの状態を「第三者製 AU が1つも見えない」ことで判定し、SKIP として
 報告する。1つでも見えていれば auval の失敗は本物として扱う。
 
-なお auval は `MusicDeviceMIDIEvent を実装しているが type が aufx` という警告を出す。
-MIDI を受けるが `aumf` ではないためで、**CI でも同じ警告が出た上で PASS している**。
-現状の既知事項。
+かつて auval は `MusicDeviceMIDIEvent を実装しているが type が aufx` という警告を
+出していた。MIDI 入力を宣言していたことが原因で、`NEEDS_MIDI_INPUT FALSE` にした結果
+シンボルごと消えた(`nm` で確認済み)。
 
 ### CI
 
@@ -465,7 +498,7 @@ src/
   PresetManager.{h,cpp}
   dsp/
     BlockSequencer.h          可変長ブロックのシーケンサー
-    GestureEngine.h           MIDI → Scene、ゲート
+    SceneSelector.h           オートメーション → Scene、ゲート
     ModulationEngine.h        ルーティング可能マトリクス
     LaneEffectV2.h            エフェクト契約(BlockContext / SampleContext)
     ParamDescriptor.h         パラメータ宣言(単一の情報源)
@@ -494,7 +527,6 @@ tools/render_test/  WAV レンダリング用ハーネス
 
 - **v1 の state は読まない**。バージョンガードで Init にフォールバックする(意図的な
   判断)。v1 の**プリセット**は上記のとおり v2 のブロックへ変換してロードされる
-- **ノート → Scene マッピングは identity 固定**。`setNoteMapping` は実装済みだが UI がない
 - **`loopPolicy` は Forward のみ実装**。Palindrome / OneShot は保存・復元されるが
   `BlockSequencer` は PPQ から位置を導くだけで常に前進し、`reverseDirection` は false 固定。
   設定する UI が無いためユーザーが未実装パスに到達することはない

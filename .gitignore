@@ -4,6 +4,9 @@
 
 # Build artifacts
 build/
+# Release-configured tree, kept alongside build/ because the golden baseline only
+# reproduces under Release (Debug's float optimisation moves three lanes).
+build-release/
 *.vst3
 *.component
 /*.wav

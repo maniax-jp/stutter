@@ -14,77 +14,47 @@ void styleCaption (juce::Label& l)
     l.setColour (juce::Label::textColourId, Palette::textLo);
 }
 
-/** Quantize grid choices, in quarter notes. 0 means "fire immediately". */
-struct QuantizeChoice { const char* name; double ppq; };
-
-const QuantizeChoice quantizeChoices[] = {
-    { "Off",  0.0  },
-    { "1/16", 0.25 },
-    { "1/8",  0.5  },
-    { "1/4",  1.0  },
-    { "1/2",  2.0  },
-    { "1 Bar", 4.0 },
-};
-
-constexpr int numQuantizeChoices = (int) (sizeof (quantizeChoices) / sizeof (quantizeChoices[0]));
 } // namespace
+
+void ActiveIndicator::paintButton (juce::Graphics& g, bool shouldDrawHighlighted, bool shouldDrawDown)
+{
+    const auto r = getLocalBounds().toFloat().reduced (1.0f, 3.0f);
+    const bool on = getToggleState();
+
+    // On and off have to be distinguishable at a glance from across a room, because during
+    // playback this is the only thing telling the user whether the bar they are hearing is
+    // glitched. Colour alone is not enough at this size, so the lit state also gets a filled
+    // body and an outer glow while the dark state gets neither.
+    juce::Colour body = on ? Palette::accent.withAlpha (0.85f) : Palette::bg1;
+    if (shouldDrawHighlighted)
+        body = body.brighter (0.12f);
+    if (shouldDrawDown)
+        body = body.darker (0.15f);
+
+    g.setColour (body);
+    g.fillRoundedRectangle (r, 3.0f);
+
+    if (on)
+    {
+        g.setColour (Palette::accent);
+        g.drawRoundedRectangle (r, 3.0f, 1.5f);
+        g.setColour (Palette::accent.withAlpha (0.28f));
+        g.drawRoundedRectangle (r.expanded (1.5f), 4.0f, 1.5f);
+    }
+    else
+    {
+        g.setColour (Palette::bg3);
+        g.drawRoundedRectangle (r, 3.0f, 1.0f);
+    }
+
+    g.setColour (on ? Palette::bg0 : Palette::textLo);
+    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)).withExtraKerningFactor (0.10f));
+    g.drawText ("ACTIVE", r, juce::Justification::centred, false);
+}
 
 PerformanceBar::PerformanceBar (StutterAudioProcessor& processor, SceneDocument& document)
     : proc (processor), doc (document)
 {
-    styleCaption (playModeLabel);
-    addAndMakeVisible (playModeLabel);
-
-    playModeBox.addItem ("Auto", 1);
-    playModeBox.addItem ("MIDI", 2);
-    playModeBox.setTooltip ("Auto: the scene runs continuously and notes only pick which one.\n"
-                            "MIDI: you hear the effect only while a note is held.");
-    playModeBox.onChange = [this]
-    {
-        if (updatingFromModel)
-            return;
-        proc.getGestureEngine().setPlayMode (playModeBox.getSelectedId() == 2 ? PlayMode::Midi
-                                                                              : PlayMode::Auto);
-        proc.getPresetManager().markDirty();
-    };
-    addAndMakeVisible (playModeBox);
-
-    styleCaption (quantizeLabel);
-    addAndMakeVisible (quantizeLabel);
-
-    for (int i = 0; i < numQuantizeChoices; ++i)
-        quantizeBox.addItem (quantizeChoices[i].name, i + 1);
-    quantizeBox.setTooltip ("Delay an incoming note to the next musical boundary.\n"
-                            "A note played slightly early still lands on the boundary it was aiming for.");
-    quantizeBox.onChange = [this]
-    {
-        if (updatingFromModel)
-            return;
-        const int idx = juce::jlimit (0, numQuantizeChoices - 1, quantizeBox.getSelectedId() - 1);
-        proc.getGestureEngine().setTriggerQuantize (quantizeChoices[idx].ppq);
-        proc.getPresetManager().markDirty();
-    };
-    addAndMakeVisible (quantizeBox);
-
-    styleCaption (releaseLabel);
-    addAndMakeVisible (releaseLabel);
-
-    // Order must match ReleaseMode's enumerators; the item id is the enum value + 1.
-    releaseBox.addItem ("On Grid", 1);
-    releaseBox.addItem ("Full", 2);
-    releaseBox.addItem ("Latch", 3);
-    releaseBox.addItem ("Instant", 4);
-    releaseBox.addItem ("Stick", 5);
-    releaseBox.setTooltip ("What happens when you let go of a note.\n"
-                           "Stored per scene, so each key can behave differently.");
-    releaseBox.onChange = [this]
-    {
-        if (updatingFromModel)
-            return;
-        pushReleaseModeToScene();
-    };
-    addAndMakeVisible (releaseBox);
-
     styleCaption (gridLabel);
     addAndMakeVisible (gridLabel);
 
@@ -144,22 +114,20 @@ PerformanceBar::PerformanceBar (StutterAudioProcessor& processor, SceneDocument&
     swingSlider.onDragStart = [this] { doc.getUndoManager().beginNewTransaction(); };
     addAndMakeVisible (swingSlider);
 
-    sceneLockToggle.setTooltip ("Notes stop choosing scenes and only gate, so you can edit one "
-                                "scene while a track plays notes that would otherwise steal focus.");
-    sceneLockToggle.onClick = [this]
-    {
-        if (updatingFromModel)
-            return;
-        proc.getGestureEngine().setSceneLock (sceneLockToggle.getToggleState());
-        proc.getPresetManager().markDirty();
-    };
-    addAndMakeVisible (sceneLockToggle);
+    activeToggle.setTooltip ("Whether the effect is heard. Automate this to glitch only the bars "
+                             "you want; everywhere else the source passes through untouched.");
+    // The attachment owns the value in both directions, so there is no onClick here: writing
+    // the parameter from a callback as well would race the attachment's own write.
+    activeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+        proc.getAPVTS(), ID::active, activeToggle);
+    addAndMakeVisible (activeToggle);
 
     refresh();
 
-    // Play Mode and Scene Lock can also be changed by a state load, so poll rather than
-    // assuming this bar is the only writer.
-    startTimerHz (8);
+    // 30Hz: the ACTIVE indicator has to track automation, which can flip it on any block
+    // boundary, and a slower poll would show the change late enough to read as a glitch in
+    // the UI rather than in the audio. Each tick is a couple of atomic loads when idle.
+    startTimerHz (30);
 }
 
 PerformanceBar::~PerformanceBar() { stopTimer(); }
@@ -172,42 +140,11 @@ void PerformanceBar::setSceneIndex (int newSceneIndex)
     refresh();
 }
 
-void PerformanceBar::pushReleaseModeToScene()
-{
-    auto scene = doc.ensureScene (sceneIndex);
-    if (! scene.isValid())
-        return;
-
-    const int mode = juce::jlimit (0, 4, releaseBox.getSelectedId() - 1);
-    scene.setProperty (SceneIDs::releaseMode, mode, &doc.getUndoManager());
-    doc.publish();
-    proc.getPresetManager().markDirty();
-}
-
 void PerformanceBar::refresh()
 {
     const juce::ScopedValueSetter<bool> guard (updatingFromModel, true);
 
-    auto& engine = proc.getGestureEngine();
-
-    playModeBox.setSelectedId (engine.getPlayMode() == PlayMode::Midi ? 2 : 1,
-                               juce::dontSendNotification);
-    sceneLockToggle.setToggleState (engine.isSceneLocked(), juce::dontSendNotification);
-
-    // Nearest match rather than exact: the stored value is a double, and a preset written by
-    // a future build could carry a grid this list does not offer.
-    const double q = engine.getTriggerQuantize();
-    int best = 0;
-    for (int i = 1; i < numQuantizeChoices; ++i)
-        if (std::abs (quantizeChoices[i].ppq - q) < std::abs (quantizeChoices[best].ppq - q))
-            best = i;
-    quantizeBox.setSelectedId (best + 1, juce::dontSendNotification);
-
     auto scene = doc.ensureScene (sceneIndex);
-    const int mode = scene.isValid()
-                       ? juce::jlimit (0, 4, (int) scene.getProperty (SceneIDs::releaseMode, 0))
-                       : 0;
-    releaseBox.setSelectedId (mode + 1, juce::dontSendNotification);
 
     beatsBox.setSelectedId (juce::jlimit (1, 8, doc.getBeats (sceneIndex)),
                             juce::dontSendNotification);
@@ -220,14 +157,16 @@ void PerformanceBar::refresh()
 
 void PerformanceBar::timerCallback()
 {
-    auto& engine = proc.getGestureEngine();
-
-    const bool modeChanged = (playModeBox.getSelectedId() == 2)
-                              != (engine.getPlayMode() == PlayMode::Midi);
-    const bool lockChanged = sceneLockToggle.getToggleState() != engine.isSceneLocked();
-
-    if (modeChanged || lockChanged)
-        refresh();
+    // Repaint on the parameter, not on the button's toggle state. The attachment updates that
+    // state through an AsyncUpdater, so a fast automation edge can be coalesced away before it
+    // ever reaches the button -- reading the parameter is what makes the indicator honest.
+    const bool nowActive = proc.getAPVTS().getRawParameterValue (ID::active)->load() > 0.5f;
+    if (nowActive != lastActiveState)
+    {
+        lastActiveState = nowActive;
+        activeToggle.setToggleState (nowActive, juce::dontSendNotification);
+        activeToggle.repaint();
+    }
 }
 
 void PerformanceBar::paint (juce::Graphics& g)
@@ -244,16 +183,10 @@ void PerformanceBar::resized()
 {
     auto r = getLocalBounds().reduced (10, 4);
 
-    auto placeField = [&r] (juce::Label& caption, juce::ComboBox& box, int captionW, int boxW)
-    {
-        caption.setBounds (r.removeFromLeft (captionW));
-        box.setBounds (r.removeFromLeft (boxW).reduced (0, 3));
-        r.removeFromLeft (12);
-    };
-
-    placeField (playModeLabel, playModeBox, 34, 66);
-    placeField (quantizeLabel, quantizeBox, 44, 68);
-    placeField (releaseLabel, releaseBox, 52, 76);
+    // ACTIVE leads the bar: it is the control the user reaches for most, and during playback
+    // it is the one they are reading rather than operating.
+    activeToggle.setBounds (r.removeFromLeft (72));
+    r.removeFromLeft (18);
 
     // Grid: beats x divisions reads as one control, so the two boxes stay tight around the "x".
     gridLabel.setBounds (r.removeFromLeft (30));
@@ -264,9 +197,6 @@ void PerformanceBar::resized()
 
     swingLabel.setBounds (r.removeFromLeft (38));
     swingSlider.setBounds (r.removeFromLeft (150).reduced (0, 2));
-    r.removeFromLeft (12);
-
-    sceneLockToggle.setBounds (r.removeFromLeft (70));
 }
 
 } // namespace stutter::ui

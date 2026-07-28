@@ -37,7 +37,7 @@
 #include "dsp/effects/DelayEffect.h"
 #include "dsp/effects/DistortionEffect.h"
 #include "dsp/BlockSequencer.h"
-#include "dsp/GestureEngine.h"
+#include "dsp/SceneSelector.h"
 #include "dsp/ModulationEngine.h"
 #include "state/SceneSchema.h"
 #include "state/SceneSnapshot.h"
@@ -228,7 +228,7 @@ int main (int argc, char* argv[])
         // fills with real history before the lane is ever triggered -- buffer-category lanes
         // would otherwise anchor into the silence that precedes sample 0.
         auto& doc = processor.getSceneDocument();
-        const int renderScene = processor.getGestureEngine().getActiveScene();
+        const int renderScene = processor.getSceneSelector().getActiveScene();
 
         juce::AudioBuffer<float> renderedOutput (2, totalSamples);
         renderedOutput.clear();

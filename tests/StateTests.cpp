@@ -408,6 +408,53 @@ TEST_CASE ("Every factory bank parses and bakes", "[presets]")
 // reopen the project.
 // ---------------------------------------------------------------------------------------
 
+TEST_CASE ("A restored scene survives the sceneSelect parameter's default", "[state][roundtrip][automation]")
+{
+    // processChunk polls sceneSelect every block, and apvts.replaceState() resets that
+    // parameter to its default for any session saved before the parameter existed. Without an
+    // explicit write-back after replaceState, the scene resolved during restore is overwritten
+    // by the default on the very next block, and every older project silently opens on the
+    // default scene instead of the one that was saved.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+
+    auto& doc = proc.getSceneDocument();
+    doc.replaceState (FactoryScenes::createBank (0));
+
+    // Land on a populated scene that is deliberately NOT the parameter default, so a
+    // regression cannot pass by coincidence.
+    int target = -1;
+    for (int i = 0; i < maxScenes && target < 0; ++i)
+        if (const auto* s = proc.getSceneStore().get (i))
+            if (s->populated && s->hasAnyBlocks() && i != defaultSceneIndex)
+                target = i;
+
+    REQUIRE (target >= 0);
+    proc.getSceneSelector().setActiveScene (target);
+
+    juce::MemoryBlock saved;
+    proc.getStateInformation (saved);
+
+    StutterAudioProcessor restored;
+    restored.setPlayConfigDetails (2, 2, 48000.0, 512);
+    restored.prepareToPlay (48000.0, 512);
+    restored.setStateInformation (saved.getData(), (int) saved.getSize());
+
+    CHECK (restored.getSceneSelector().getActiveScene() == target);
+
+    // The parameter has to agree, or the next processed block pulls the scene back.
+    auto* p = restored.getAPVTS().getParameter (ID::sceneSelect);
+    REQUIRE (p != nullptr);
+    CHECK ((int) p->convertFrom0to1 (p->getValue()) == target);
+
+    // Prove it by rendering: this is where the bug would actually bite.
+    juce::AudioBuffer<float> block (2, 512);
+    block.clear();
+    juce::MidiBuffer midi;
+    restored.processBlock (block, midi);
+    CHECK (restored.getSceneSelector().getActiveScene() == target);
+}
+
 TEST_CASE ("Scene work survives a host save/restore round-trip", "[state][roundtrip]")
 {
     StutterAudioProcessor proc;
@@ -515,52 +562,64 @@ TEST_CASE ("Factory modulation routes live on the scene the editor opens on", "[
     CHECK (onDefaultScene > 0);
 }
 
-TEST_CASE ("Performance settings survive a save/restore round-trip", "[state][roundtrip][gesture]")
+TEST_CASE ("A session saved with the old MIDI settings still opens", "[state][roundtrip]")
 {
-    // Play Mode and Scene Lock are deliberately not APVTS parameters, so nothing else carries
-    // them across a session: if getStateInformation drops them, a project reopens in Auto and
-    // the user's MIDI setup is silently gone.
+    // Sessions written before automation replaced the MIDI performance layer carry playMode,
+    // sceneLock and triggerQuantize as root properties. Nothing reads them now. They must be
+    // ignored rather than rejected: the schema version is deliberately unchanged, because
+    // everything else about the tree still means exactly what it did, and bumping it would
+    // drop every existing project to Init.
     StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, 48000.0, 512);
     proc.prepareToPlay (48000.0, 512);
-
     proc.getSceneDocument().replaceState (FactoryScenes::createBank (3));
-    proc.getGestureEngine().setPlayMode (PlayMode::Midi);
-    proc.getGestureEngine().setSceneLock (true);
-    proc.getGestureEngine().setTriggerQuantize (0.5);
 
     juce::MemoryBlock saved;
     proc.getStateInformation (saved);
 
+    // Reopen the saved tree and graft the retired properties back on, reproducing exactly what
+    // an older build would have written.
+    std::unique_ptr<juce::XmlElement> xml (juce::AudioProcessor::getXmlFromBinary (saved.getData(),
+                                                                                  (int) saved.getSize()));
+    REQUIRE (xml != nullptr);
+    auto tree = juce::ValueTree::fromXml (*xml);
+    REQUIRE (tree.isValid());
+
+    tree.setProperty (SceneIDs::playMode, 1 /* the old PlayMode::Midi */, nullptr);
+    tree.setProperty (SceneIDs::sceneLock, true, nullptr);
+    tree.setProperty (SceneIDs::triggerQuantize, 0.5, nullptr);
+
+    juce::MemoryBlock legacy;
+    std::unique_ptr<juce::XmlElement> legacyXml (tree.createXml());
+    juce::AudioProcessor::copyXmlToBinary (*legacyXml, legacy);
+
     StutterAudioProcessor restored;
+    restored.setPlayConfigDetails (2, 2, 48000.0, 512);
     restored.prepareToPlay (48000.0, 512);
-    restored.setStateInformation (saved.getData(), (int) saved.getSize());
+    restored.setStateInformation (legacy.getData(), (int) legacy.getSize());
 
-    CHECK (restored.getGestureEngine().getPlayMode() == PlayMode::Midi);
-    CHECK (restored.getGestureEngine().isSceneLocked());
-    CHECK_THAT (restored.getGestureEngine().getTriggerQuantize(), WithinAbs (0.5, 1.0e-9));
+    // Not dropped to Init: the scenes came back.
+    int populated = 0;
+    for (int i = 0; i < maxScenes; ++i)
+        if (const auto* s = restored.getSceneStore().get (i))
+            if (s->populated)
+                ++populated;
+    CHECK (populated > 0);
+
+    // And the leftover "MIDI mode" cannot silence it -- the gate belongs to `active` now,
+    // which defaults to on.
+    juce::AudioBuffer<float> block (2, 512);
+    for (int c = 0; c < 2; ++c)
+    {
+        auto* d = block.getWritePointer (c);
+        for (int i = 0; i < 512; ++i) d[i] = 0.5f;
+    }
+    juce::MidiBuffer midi;
+    restored.processBlock (block, midi);
+    CHECK (block.getRMSLevel (0, 0, 512) > 0.1f);
 }
 
-TEST_CASE ("Loading Init clears a leftover MIDI mode", "[state][gesture]")
-{
-    // MIDI mode is silent until a note arrives. Carrying it into an Init patch would look
-    // exactly like a broken plugin, so the fallback has to reset it.
-    StutterAudioProcessor proc;
-    proc.prepareToPlay (48000.0, 512);
-    proc.getGestureEngine().setPlayMode (PlayMode::Midi);
-    proc.getGestureEngine().setSceneLock (true);
-
-    // v1-shaped state (no version property) is rejected and falls back to Init.
-    juce::ValueTree legacy ("PARAMETERS");
-    std::unique_ptr<juce::XmlElement> xml (legacy.createXml());
-    juce::MemoryBlock block;
-    juce::AudioProcessor::copyXmlToBinary (*xml, block);
-    proc.setStateInformation (block.getData(), (int) block.getSize());
-
-    CHECK (proc.getGestureEngine().getPlayMode() == PlayMode::Auto);
-    CHECK_FALSE (proc.getGestureEngine().isSceneLocked());
-}
-
-TEST_CASE ("Release mode is stored per scene", "[state][gesture]")
+TEST_CASE ("Release mode is stored per scene", "[state]")
 {
     // The UI writes it to the scene rather than globally, so two keys can release differently.
     StutterAudioProcessor proc;
@@ -658,16 +717,23 @@ TEST_CASE ("Every editable field survives save and reload", "[state][roundtrip]"
     sceneTree.setProperty (SceneIDs::releaseMode, (int) ReleaseMode::Latch, nullptr);
     doc.publish();
 
-    proc.getGestureEngine().setActiveScene (sc);
+    proc.getSceneSelector().setActiveScene (sc);
     proc.pumpSceneMirror();
     const auto decayId = ID::lanePrefix (0) + ID::stutterDecay;
     const auto& range = proc.getAPVTS().getParameterRange (decayId);
-    proc.getAPVTS().getParameter (decayId)->setValueNotifyingHost (range.convertTo0to1 (0.66f));
+    {
+        // Gestured, standing in for a knob turn. Write-back deliberately ignores ungestured
+        // changes so that replaying a host automation lane cannot rewrite the scene.
+        auto* p = proc.getAPVTS().getParameter (decayId);
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (range.convertTo0to1 (0.66f));
+        p->endChangeGesture();
+    }
     proc.pumpSceneMirror();   // parameter writes are deferred to the timer; flush them
 
-    proc.getGestureEngine().setPlayMode (PlayMode::Midi);
-    proc.getGestureEngine().setSceneLock (true);
-    proc.getGestureEngine().setTriggerQuantize (0.5);
+    // The automation-facing controls are ordinary APVTS parameters, so they ride along in the
+    // same state; setting `active` off here proves the pair survives rather than defaulting.
+    proc.getAPVTS().getParameter (ID::active)->setValueNotifyingHost (0.0f);
 
     juce::MemoryBlock saved;
     proc.getStateInformation (saved);
@@ -688,7 +754,5 @@ TEST_CASE ("Every editable field survives save and reload", "[state][roundtrip]"
     CHECK (s->releaseMode == ReleaseMode::Latch);
     CHECK_THAT (s->lanes[0].params[1], WithinAbs (0.66f, 1.0e-4f));
 
-    CHECK (restored.getGestureEngine().getPlayMode() == PlayMode::Midi);
-    CHECK (restored.getGestureEngine().isSceneLocked());
-    CHECK_THAT (restored.getGestureEngine().getTriggerQuantize(), WithinAbs (0.5, 1.0e-9));
+    CHECK (restored.getAPVTS().getRawParameterValue (ID::active)->load() < 0.5f);
 }

@@ -2,7 +2,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "TestHelpers.h"
-#include "dsp/GestureEngine.h"
+#include "dsp/SceneSelector.h"
 #include "dsp/ModulationEngine.h"
 #include "dsp/TimingMode.h"
 #include "dsp/effects/StutterEffect.h"
@@ -196,188 +196,135 @@ TEST_CASE ("Swing displaces odd boundaries and pins even ones", "[sequencer][swi
 }
 
 // ---------------------------------------------------------------------------------------
-// Gesture layer.
+// Scene selection and the wet gate.
 // ---------------------------------------------------------------------------------------
 
-namespace
+TEST_CASE ("Selecting a scene flags exactly one mirror", "[selector]")
 {
-juce::MidiBuffer noteOn (int note, int offset = 0)
-{
-    juce::MidiBuffer b;
-    b.addEvent (juce::MidiMessage::noteOn (1, note, 1.0f), offset);
-    return b;
+    // The mirror is what refills the editor's knobs from the scene being heard. Hosts re-send
+    // the same automation value every block, so a selector that flagged on every call would
+    // rebuild the mirror continuously; one that never flagged would leave the editor showing
+    // the wrong scene.
+    SceneSelector s;
+    s.prepare (sampleRate);
+
+    s.applyAutomation (60, true);
+    CHECK (s.getActiveScene() == 60);
+    CHECK (s.consumePendingMirror() == 60);
+    CHECK (s.consumePendingMirror() == -1);   // consumed exactly once
+
+    // Re-sending the same value must not flag again.
+    s.applyAutomation (60, true);
+    CHECK (s.consumePendingMirror() == -1);
+
+    s.applyAutomation (11, true);
+    CHECK (s.getActiveScene() == 11);
+    CHECK (s.consumePendingMirror() == 11);
 }
 
-juce::MidiBuffer noteOff (int note, int offset = 0)
+TEST_CASE ("Scene selection is clamped to the bank", "[selector]")
 {
-    juce::MidiBuffer b;
-    b.addEvent (juce::MidiMessage::noteOff (1, note), offset);
-    return b;
+    // A host is free to send anything the parameter range allows, and a corrupt project could
+    // send worse. Reading past the bank would be a wild pointer on the audio thread.
+    SceneSelector s;
+    s.prepare (sampleRate);
+
+    s.applyAutomation (-5, true);
+    CHECK (s.getActiveScene() == firstSceneIndex);
+
+    s.applyAutomation (maxScenes + 100, true);
+    CHECK (s.getActiveScene() == lastSceneIndex);
 }
 
-constexpr double ppqPerSample = (bpm / 60.0) / sampleRate;
-} // namespace
-
-TEST_CASE ("A note selects a scene, subject to Scene Lock", "[gesture]")
+TEST_CASE ("Scene 0 means unspecified, not scene zero", "[selector]")
 {
-    GestureEngine g;
-    g.prepare (sampleRate);
-    g.setIdentityMapping();
-    g.setPlayMode (PlayMode::Midi);
+    // Users type these numbers into an automation lane by hand, so the numbering starts at 1
+    // to match what the browser shows. That leaves 0 free to mean "nothing written here",
+    // which is what an untouched lane sends -- and an untouched lane must not drag the
+    // selection away from whatever was picked in the editor.
+    SceneSelector s;
+    s.prepare (sampleRate);
 
-    g.processMidi (noteOn (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    CHECK (g.getActiveScene() == 60);
-    CHECK (g.consumePendingMirror() == 60);
-    CHECK (g.consumePendingMirror() == -1);   // consumed once
+    s.applyAutomation (7, true);
+    REQUIRE (s.getActiveScene() == 7);
+    (void) s.consumePendingMirror();
 
-    g.setSceneLock (true);
-    g.processMidi (noteOn (72), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    CHECK (g.getActiveScene() == 60);
+    s.applyAutomation (noSceneIndex, true);
+    CHECK (s.getActiveScene() == 7);              // unchanged
+    CHECK (s.consumePendingMirror() == -1);       // and nothing to re-mirror
 
-    g.setSceneLock (false);
-    g.processMidi (noteOn (72), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    CHECK (g.getActiveScene() == 72);
+    // The gate is still the `active` parameter's business, even when no scene is specified.
+    s.applyAutomation (noSceneIndex, false);
+    for (int i = 0; i < (int) (sampleRate * 0.05); ++i)
+        s.nextGateGain();
+    CHECK (s.getGateGain() < 0.01f);
+    CHECK (s.getActiveScene() == 7);
 }
 
-TEST_CASE ("The gate ramps rather than steps", "[gesture][click]")
+TEST_CASE ("Scene numbering starts at one", "[selector]")
 {
-    // The gate is a ramp on the mix rather than a mute on the sequencer specifically so that
-    // every transition is click-free by construction. A regression to a hard mute would be
-    // silent in a spectrum plot and obvious on a note-off.
-    GestureEngine g;
-    g.prepare (sampleRate);
-    g.setIdentityMapping();
-    g.setPlayMode (PlayMode::Midi);
+    // Slot 0 exists in the array but is never addressable: the number on screen and the
+    // number typed into automation have to be the same, and people count slots from 1.
+    CHECK (firstSceneIndex == 1);
+    CHECK (noSceneIndex == 0);
+    CHECK (defaultSceneIndex == firstSceneIndex);
+    CHECK (lastSceneIndex == maxScenes - 1);
+}
 
+TEST_CASE ("The gate ramps rather than steps", "[selector][click]")
+{
+    // The gate is a gain multiplied into the wet mix, not a mute on the sequencer. Automation
+    // flips `active` at a block boundary, so without the ramp every edge would be a step --
+    // and a step in a gain is a click.
+    SceneSelector s;
+    s.prepare (sampleRate);
+
+    // Opening.
+    s.applyAutomation (0, false);
+    for (int i = 0; i < (int) (sampleRate * 0.05); ++i)
+        s.nextGateGain();
+    REQUIRE (s.getGateGain() < 0.01f);
+
+    s.applyAutomation (0, true);
+    float previous = s.getGateGain();
     float maxStep = 0.0f;
-    float prev = g.getGateGain();
-    auto run = [&] (int n)
+    for (int i = 0; i < (int) (sampleRate * 0.05); ++i)
     {
-        for (int i = 0; i < n; ++i)
-        {
-            const float gain = g.nextGateGain();
-            maxStep = juce::jmax (maxStep, std::abs (gain - prev));
-            prev = gain;
-        }
-    };
-
-    g.processMidi (noteOn (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    run (blockSize);
-    CHECK (g.getGateGain() > 0.99f);
-
-    g.processMidi (noteOff (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    run (blockSize);
-    CHECK (g.getGateGain() < 0.01f);
-
-    INFO ("max per-sample gate step " << maxStep);
-    CHECK (maxStep <= 1.0f / 200.0f);   // a 5ms ramp at 48k is 240 samples
-}
-
-TEST_CASE ("Auto mode holds the gate open", "[gesture]")
-{
-    GestureEngine g;
-    g.prepare (sampleRate);
-    g.setIdentityMapping();
-    g.setPlayMode (PlayMode::Auto);
-
-    g.processMidi ({}, blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-    CHECK (g.getGateGain() > 0.99f);
-}
-
-TEST_CASE ("Release modes", "[gesture]")
-{
-    SECTION ("Latch ignores note-off")
-    {
-        GestureEngine g;
-        g.prepare (sampleRate);
-        g.setIdentityMapping();
-        g.setPlayMode (PlayMode::Midi);
-
-        g.processMidi (noteOn (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Latch);
-        for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-        g.processMidi (noteOff (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Latch);
-        for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-        CHECK (g.getGateGain() > 0.99f);
+        const float g = s.nextGateGain();
+        maxStep = juce::jmax (maxStep, std::abs (g - previous));
+        previous = g;
     }
 
-    SECTION ("OnGrid holds until the boundary, then closes")
+    CHECK (s.getGateGain() > 0.99f);
+    // 5ms at this rate means no single sample may move more than 1/240th; allow a little
+    // slack for the integer rounding in gateRampSamples.
+    INFO ("max per-sample step " << maxStep);
+    CHECK (maxStep <= 1.0f / 200.0f);
+
+    // Closing has to be just as gradual.
+    s.applyAutomation (0, false);
+    previous = s.getGateGain();
+    maxStep = 0.0f;
+    for (int i = 0; i < (int) (sampleRate * 0.05); ++i)
     {
-        GestureEngine g;
-        g.prepare (sampleRate);
-        g.setIdentityMapping();
-        g.setPlayMode (PlayMode::Midi);
-        g.setTriggerQuantize (1.0);
-
-        double clock = 0.0;
-        g.processMidi (noteOn (60), blockSize, clock, ppqPerSample, ReleaseMode::OnGrid);
-        for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-        clock += ppqPerSample * blockSize;
-
-        g.processMidi (noteOff (60), blockSize, clock, ppqPerSample, ReleaseMode::OnGrid);
-        for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-        clock += ppqPerSample * blockSize;
-        CHECK (g.getGateGain() > 0.99f);
-
-        while (clock < 1.2)
-        {
-            g.processMidi ({}, blockSize, clock, ppqPerSample, ReleaseMode::OnGrid);
-            for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-            clock += ppqPerSample * blockSize;
-        }
-        CHECK (g.getGateGain() < 0.01f);
+        const float g = s.nextGateGain();
+        maxStep = juce::jmax (maxStep, std::abs (g - previous));
+        previous = g;
     }
+
+    CHECK (s.getGateGain() < 0.01f);
+    CHECK (maxStep <= 1.0f / 200.0f);
 }
 
-TEST_CASE ("Quantization accepts an early note", "[gesture]")
+TEST_CASE ("The gate starts open", "[selector]")
 {
-    // A note arriving just before a boundary is aiming at that boundary, not the previous
-    // one. This is what lets a player anticipate the beat instead of chasing it.
-    GestureEngine g;
-    g.prepare (sampleRate);
-    g.setIdentityMapping();
-    g.setPlayMode (PlayMode::Midi);
-    g.setTriggerQuantize (1.0);
-
-    g.processMidi (noteOn (64), blockSize, 0.9, ppqPerSample, ReleaseMode::Instant);
-    CHECK (g.getActiveScene() != 64);   // waits rather than firing late
-
-    double clock = 0.9;
-    for (int b = 0; b < 40 && g.getActiveScene() != 64; ++b)
-    {
-        g.processMidi ({}, blockSize, clock, ppqPerSample, ReleaseMode::Instant);
-        clock += ppqPerSample * blockSize;
-    }
-    CHECK (g.getActiveScene() == 64);
-
-    GestureEngine late;
-    late.prepare (sampleRate);
-    late.setIdentityMapping();
-    late.setPlayMode (PlayMode::Midi);
-    late.setTriggerQuantize (1.0);
-    late.processMidi (noteOn (67), blockSize, 2.1, ppqPerSample, ReleaseMode::Instant);
-    CHECK (late.getActiveScene() == 67);   // well past the boundary: fire at once
+    // Matches the `active` parameter's default. Starting closed would silence any path that
+    // never reaches applyAutomation, which reads as the plugin being broken on insertion.
+    SceneSelector s;
+    s.prepare (sampleRate);
+    CHECK (s.getGateGain() > 0.99f);
 }
 
-TEST_CASE ("Only the last released note ends the gesture", "[gesture]")
-{
-    GestureEngine g;
-    g.prepare (sampleRate);
-    g.setIdentityMapping();
-    g.setPlayMode (PlayMode::Midi);
-
-    g.processMidi (noteOn (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    g.processMidi (noteOn (64), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-
-    g.processMidi (noteOff (60), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-    CHECK (g.getGateGain() > 0.99f);
-
-    g.processMidi (noteOff (64), blockSize, 0.0, ppqPerSample, ReleaseMode::Instant);
-    for (int i = 0; i < blockSize; ++i) g.nextGateGain();
-    CHECK (g.getGateGain() < 0.01f);
-}
 
 // ---------------------------------------------------------------------------------------
 // Modulation matrix.

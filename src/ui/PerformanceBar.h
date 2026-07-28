@@ -9,18 +9,32 @@ namespace stutter::ui
 {
 
 /**
-    The MIDI performance controls: Play Mode, Scene Lock, trigger quantize, and the active
-    scene's Release mode.
+    ACTIVE, and the per-scene grid geometry: beats x divisions and swing.
 
-    These sit beside the keyboard strip rather than in the header because they change what
-    playing a note *does*, and the keyboard is what the user is looking at while deciding.
+    ACTIVE leads the bar because it is both a control and a readout. The user clicks it to
+    audition, and the host's automation moves it while they watch -- so it is drawn from the
+    parameter rather than from its own toggle state, and repainted on a timer so an automated
+    change is visible the moment it happens.
 
-    Play Mode / Scene Lock / Quantize are global and live in the state tree, not in APVTS.
-    They are modal rather than continuous -- switching Play Mode mid-phrase changes whether
-    notes gate at all -- so exposing them as automatable parameters would invite hosts to
-    produce note handling no one asked for. Release mode is per-scene, so it is written to
-    the scene document and follows whichever scene the editor is showing.
+    The grid controls sit here rather than in the header because changing beats or divisions
+    re-times the pattern under the blocks the user is looking at.
 */
+/**
+    The ACTIVE indicator: a button that is also a live readout.
+
+    It has to work in both directions at once. The user clicks it to audition, and the host's
+    automation lane moves it while they watch -- so it draws from the parameter every frame
+    rather than from its own toggle state. A plain ToggleButton would only show what the last
+    click did, and during playback that is exactly the wrong thing to trust.
+*/
+class ActiveIndicator : public juce::Button
+{
+public:
+    ActiveIndicator() : juce::Button ("ACTIVE") { setClickingTogglesState (true); }
+
+    void paintButton (juce::Graphics&, bool shouldDrawHighlighted, bool shouldDrawDown) override;
+};
+
 class PerformanceBar : public juce::Component, private juce::Timer
 {
 public:
@@ -42,22 +56,17 @@ public:
 
 private:
     void timerCallback() override;
-    void pushReleaseModeToScene();
 
     StutterAudioProcessor& proc;
     SceneDocument& doc;
     int sceneIndex = 0;
 
-    juce::Label playModeLabel { {}, "PLAY" };
-    juce::ComboBox playModeBox;
-
-    juce::Label quantizeLabel { {}, "QUANT" };
-    juce::ComboBox quantizeBox;
-
-    juce::Label releaseLabel { {}, "RELEASE" };
-    juce::ComboBox releaseBox;
-
-    juce::ToggleButton sceneLockToggle { "LOCK" };
+    // Where the effect is heard. The attachment carries clicks to the host and host moves
+    // back to the button; the timer below repaints so an automated change is visible the
+    // moment it happens rather than whenever the attachment's async update lands.
+    ActiveIndicator activeToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> activeAttachment;
+    bool lastActiveState = true;
 
     // Per-scene grid geometry. Changing these re-times the pattern rather than moving blocks:
     // block positions are stored in divisions, so the same arrangement re-reads against the

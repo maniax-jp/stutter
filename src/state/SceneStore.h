@@ -12,7 +12,7 @@ namespace stutter
 /**
     Owns the bank of scene snapshots and publishes it to the audio thread.
 
-    The problem this solves: a MIDI note arriving on the audio thread selects a scene, but the
+    The problem this solves: an automation value read on the audio thread selects a scene, but the
     scene data is built on the message thread from a ValueTree. The audio thread must never
     see a half-built scene, must never allocate, and must never block -- and the message thread
     must never free a bank the audio thread is still reading.

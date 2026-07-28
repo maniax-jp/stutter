@@ -53,11 +53,11 @@ inline constexpr int laneParamSlots = maxLanes * maxParamsPerLane;
 /** Global parameters that a curve is allowed to target. These occupy the tail of the index
     space, immediately after the lane slots.
 
-    Note this is a subset of the APVTS globals: hostSync/playMode/sceneLock and friends are
-    discrete transport or mode switches, and modulating them from a curve would be nonsense
-    (and would fight the gesture layer for control). Only the continuous output-stage values
-    are routable, which is what makes SE2's "modulated output gain IS your sidechain pump"
-    trick available here. */
+    Note this is a subset of the APVTS globals: hostSync, sceneSelect and active are discrete
+    transport or performance switches, and modulating them from a curve would be nonsense (and
+    would fight the automation lane for control). Only the continuous output-stage values are
+    routable, which is what makes SE2's "modulated output gain IS your sidechain pump" trick
+    available here. */
 enum class GlobalParam
 {
     dryWet = 0,

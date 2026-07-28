@@ -11,7 +11,7 @@ namespace stutter
 
     Layout:
 
-        <StutterState version="2" activeScene sceneLock playMode triggerQuantize>
+        <StutterState version="2" activeScene>
           <PARAMETERS>                 <!-- APVTS: globals + active-scene mirror -->
           <Scenes>
             <Scene index name note seed beats divisions swing loopPolicy releaseMode>
@@ -41,9 +41,9 @@ namespace SceneIDs
 {
     // Root and top-level nodes
     static const juce::Identifier stateRoot   { "StutterState" };
-    /** Unused. The globals it was meant to hold (activeScene, sceneLock, playMode,
-        triggerQuantize) are written as root properties instead, so nothing reads or writes a
-        <Globals> element -- kept only so a reader of old notes does not go looking for it. */
+    /** Unused. The globals it was meant to hold are written as root properties instead, so
+        nothing reads or writes a <Globals> element -- kept only so a reader of old notes does
+        not go looking for it. */
     static const juce::Identifier globalsNode { "Globals" };
     static const juce::Identifier scenesNode  { "Scenes" };
     static const juce::Identifier scene       { "Scene" };
@@ -69,6 +69,12 @@ namespace SceneIDs
 
     // Globals
     static const juce::Identifier activeScene { "activeScene" };
+
+    /** Retired with the MIDI performance layer: which scene plays and whether it is heard are
+        now the sceneSelect and active parameters, so automation can drive them. Sessions saved
+        before that still carry these three, and nothing reads them -- the identifiers stay so
+        the compatibility test can write a period-accurate tree, and so that a property found
+        in an old project file can be traced to what it once meant. */
     static const juce::Identifier sceneLock   { "sceneLock" };
     static const juce::Identifier playMode    { "playMode" };
     static const juce::Identifier triggerQuantize { "triggerQuantize" };

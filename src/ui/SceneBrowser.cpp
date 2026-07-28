@@ -8,37 +8,33 @@ SceneBrowser::SceneBrowser (StutterAudioProcessor& processor, SceneDocument& doc
     : proc (processor), doc (document)
 {
     setWantsKeyboardFocus (false);
-    startTimerHz (20);
+    // 30Hz: automation can move the scene on any block boundary, and the highlight has to
+    // read as instant when it does.
+    startTimerHz (30);
 }
 
 SceneBrowser::~SceneBrowser() { stopTimer(); }
 
-bool SceneBrowser::isBlackKey (int note) const
+juce::Rectangle<float> SceneBrowser::getCellBounds (int sceneIndex) const
 {
-    const int n = ((note % 12) + 12) % 12;
-    return n == 1 || n == 3 || n == 6 || n == 8 || n == 10;
-}
-
-juce::Rectangle<float> SceneBrowser::getKeyBounds (int note) const
-{
-    const int offset = note - firstVisibleNote;
-    if (offset < 0 || offset >= visibleNotes)
+    const int offset = sceneIndex - firstVisibleScene;
+    if (offset < 0 || offset >= visibleScenes)
         return {};
 
     const auto b = getLocalBounds().toFloat();
-    const float w = b.getWidth() / (float) visibleNotes;
+    const float w = b.getWidth() / (float) visibleScenes;
     return { b.getX() + (float) offset * w, b.getY(), w, b.getHeight() };
 }
 
-int SceneBrowser::noteAtPoint (juce::Point<int> p) const
+int SceneBrowser::sceneAtPoint (juce::Point<int> p) const
 {
     if (! getLocalBounds().contains (p))
         return -1;
 
-    const float w = (float) getWidth() / (float) visibleNotes;
+    const float w = (float) getWidth() / (float) visibleScenes;
     const int offset = (int) ((float) p.x / juce::jmax (1.0f, w));
-    const int note = firstVisibleNote + juce::jlimit (0, visibleNotes - 1, offset);
-    return juce::jlimit (0, 127, note);
+    const int scene = firstVisibleScene + juce::jlimit (0, visibleScenes - 1, offset);
+    return juce::jlimit (firstSceneIndex, lastSceneIndex, scene);
 }
 
 bool SceneBrowser::sceneHasContent (int sceneIndex) const
@@ -56,42 +52,54 @@ bool SceneBrowser::sceneHasContent (int sceneIndex) const
 
 void SceneBrowser::mouseDown (const juce::MouseEvent& e)
 {
-    const int note = noteAtPoint (e.getPosition());
-    if (note < 0)
+    const int scene = sceneAtPoint (e.getPosition());
+    if (scene < 0)
         return;
 
-    selectedScene = note;
+    selectedScene = scene;
     if (onSceneSelected)
         onSceneSelected (selectedScene);
 
     // Selecting a scene in the browser also makes it the one that plays, so the user hears
-    // what they are editing without having to send a note.
-    proc.getGestureEngine().setActiveScene (selectedScene);
+    // what they are editing. Routed through the parameter rather than straight into the
+    // engine: sceneSelect is the single source of truth for which scene plays, and writing
+    // both would leave the UI and the host disagreeing about the current value. The gesture
+    // pair is what lets a host in automation-write mode record this click.
+    if (auto* p = proc.getAPVTS().getParameter (ID::sceneSelect))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) selectedScene));
+        p->endChangeGesture();
+    }
+
     repaint();
 }
 
 void SceneBrowser::mouseMove (const juce::MouseEvent& e)
 {
-    const int note = noteAtPoint (e.getPosition());
-    if (note != hoveredNote)
+    const int scene = sceneAtPoint (e.getPosition());
+    if (scene != hoveredScene)
     {
-        hoveredNote = note;
+        hoveredScene = scene;
         repaint();
     }
 }
 
 void SceneBrowser::mouseExit (const juce::MouseEvent&)
 {
-    if (hoveredNote != -1)
+    if (hoveredScene != -1)
     {
-        hoveredNote = -1;
+        hoveredScene = -1;
         repaint();
     }
 }
 
 void SceneBrowser::timerCallback()
 {
-    const int active = proc.getGestureEngine().getActiveScene();
+    // Read the engine rather than the parameter: this highlight means "the scene you are
+    // hearing", and the engine is what the audio path actually rendered. The two agree
+    // within a block, but only the engine is right during that block.
+    const int active = proc.getSceneSelector().getActiveScene();
     if (active != lastActiveScene)
     {
         lastActiveScene = active;
@@ -107,32 +115,29 @@ void SceneBrowser::paint (juce::Graphics& g)
 
     const int active = lastActiveScene;
 
-    for (int i = 0; i < visibleNotes; ++i)
+    for (int i = 0; i < visibleScenes; ++i)
     {
-        const int note = firstVisibleNote + i;
-        const auto r = getKeyBounds (note).reduced (1.0f, 2.0f);
+        const int scene = firstVisibleScene + i;
+        const auto r = getCellBounds (scene).reduced (1.0f, 2.0f);
         if (r.isEmpty())
             continue;
 
-        const bool black = isBlackKey (note);
-        const bool occupied = sceneHasContent (note);
-        const bool selected = note == selectedScene;
-        const bool playing = note == active;
-        const bool hovered = note == hoveredNote;
+        const bool occupied = sceneHasContent (scene);
+        const bool selected = scene == selectedScene;
+        const bool playing = scene == active;
+        const bool hovered = scene == hoveredScene;
 
-        // Base key. Black keys sit darker so the octave layout stays readable even when
-        // every scene is occupied.
-        juce::Colour base = black ? Palette::bg1 : Palette::bg2;
-        if (occupied)
-            base = Palette::accent.withAlpha (black ? 0.30f : 0.45f);
+        // Fill carries "has content": scanning for somewhere to build is the most common
+        // reason to look at this strip.
+        juce::Colour base = occupied ? Palette::accent.withAlpha (0.45f) : Palette::bg2;
         if (hovered)
             base = base.brighter (0.15f);
 
         g.setColour (base);
         g.fillRoundedRectangle (r, 2.0f);
 
-        // The playing scene outranks the selected one visually: during performance, which
-        // scene you are hearing matters more than which one is open for editing.
+        // Playing outranks selected visually: while the timeline runs, which scene you are
+        // hearing matters more than which one is open for editing.
         if (playing)
         {
             g.setColour (Palette::accent);
@@ -146,14 +151,18 @@ void SceneBrowser::paint (juce::Graphics& g)
             g.drawRoundedRectangle (r, 2.0f, 1.0f);
         }
 
-        // Label C notes only; anything more is unreadable at this key width.
-        if ((note % 12) == 0)
-        {
-            g.setColour (Palette::textLo);
-            g.setFont (juce::Font (juce::FontOptions (9.0f)));
-            g.drawText ("C" + juce::String (note / 12 - 1), r.reduced (1.0f),
-                        juce::Justification::centredBottom, false);
-        }
+        // Every slot is numbered. This number is what the user types into an automation lane,
+        // so having to count along from a marked slot to work one out would make the strip
+        // useless for the job it exists to do.
+        //
+        // Occupied cells are filled with the accent, which is light enough that low-contrast
+        // text disappears on it -- so the label follows the fill rather than being one colour
+        // throughout.
+        g.setColour (occupied ? Palette::bg0.withAlpha (0.75f)
+                              : (playing || selected ? Palette::textHi : Palette::textLo));
+        g.setFont (juce::Font (juce::FontOptions (9.0f)));
+        g.drawText (juce::String (scene), r.reduced (1.0f),
+                    juce::Justification::centredBottom, false);
     }
 }
 

@@ -1,6 +1,7 @@
 #include "ParameterLayout.h"
 #include "ParameterIDs.h"
 #include "TimingMode.h"
+#include "../state/SceneSnapshot.h"
 
 namespace
 {
@@ -43,6 +44,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ID::internalBpm, 1 }, "Internal BPM",
         juce::NormalisableRange<float> (40.0f, 240.0f), 120.0f));
+
+    // ---- Performance controls, driven from the host's automation lane ----
+    // Int rather than Choice: scene names are user data and change at runtime, so a static
+    // choice list could only ever show the numbers anyway, and Choice normalisation is pinned
+    // to index/(n-1), which would break every saved automation lane if the scene count moved.
+    //
+    // The range starts at 0 even though scenes start at 1: users type these numbers into an
+    // automation lane by hand, and a lane they have not written reads as 0. Treating 0 as
+    // "leave the scene alone" is what stops an untouched lane from yanking the selection to
+    // slot 1 the moment playback starts.
+    params.push_back (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { ID::sceneSelect, 1 }, "Scene",
+        noSceneIndex, lastSceneIndex, defaultSceneIndex,
+        juce::AudioParameterIntAttributes().withStringFromValueFunction (
+            [] (int value, int) { return value == noSceneIndex ? juce::String ("--")
+                                                               : juce::String (value); })));
+
+    // Defaults to on so the plugin makes a sound the moment it is inserted. A glitch effect
+    // wants to be off for most bars, but that is the automation lane's job to say; a plugin
+    // that is silent on insertion reads as broken.
+    params.push_back (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ID::active, 1 }, "Active", true));
 
     auto addRateChoice = [&params] (int lane, const juce::String& name, const juce::String& label, int defaultIndex)
     {

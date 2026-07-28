@@ -181,7 +181,7 @@ TEST_CASE ("sequencerOn=false bypasses the lanes but leaves curves working", "[p
     SECTION ("a fully active lane is silenced by the bypass")
     {
         auto& doc = proc.getSceneDocument();
-        const int sceneIdx = proc.getGestureEngine().getActiveScene();
+        const int sceneIdx = proc.getSceneSelector().getActiveScene();
         for (int d = 0; d < numSteps; ++d)
             doc.addBlock (sceneIdx, StutterAudioProcessor::laneStutter, d, 1);
         doc.publish();
@@ -245,52 +245,169 @@ TEST_CASE ("internalBpm changes the free-running playhead speed", "[processor][t
 }
 
 // ---------------------------------------------------------------------------------------
-// MIDI reaching the processor, and the APVTS mirror.
+// Automation reaching the processor, and the APVTS mirror.
 // ---------------------------------------------------------------------------------------
 
-TEST_CASE ("MIDI reaches the processor and gates the wet path", "[processor][gesture]")
+TEST_CASE ("The plugin declares and handles no MIDI", "[processor]")
 {
-    // acceptsMidi(), the per-chunk MIDI slice, and the gate's place in the mix are each
-    // individually correct and collectively breakable, so this drives the whole plugin.
+    // This is an audio effect that is called from the automation lane, not played from a
+    // keyboard. Declaring MIDI input made hosts offer a routing that did nothing useful and
+    // made auval warn about an aufx exporting MusicDeviceMIDIEvent.
     StutterAudioProcessor proc;
     proc.setPlayConfigDetails (2, 2, sampleRate, blockSize);
     proc.prepareToPlay (sampleRate, blockSize);
-    CHECK (proc.acceptsMidi());
 
-    auto& engine = proc.getGestureEngine();
-    engine.setPlayMode (PlayMode::Midi);
+    CHECK_FALSE (proc.acceptsMidi());
+    CHECK_FALSE (proc.producesMidi());
+    CHECK_FALSE (proc.isMidiEffect());
+
+    // A host that ignores the declaration and sends notes anyway must not get them back, and
+    // must not have them change anything.
+    const int sceneBefore = proc.getSceneSelector().getActiveScene();
 
     juce::AudioBuffer<float> block (2, blockSize);
-    auto renderDc = [&] (const juce::MidiBuffer& m)
+    for (int c = 0; c < 2; ++c)
+    {
+        auto* d = block.getWritePointer (c);
+        for (int i = 0; i < blockSize; ++i) d[i] = 0.5f;
+    }
+
+    juce::MidiBuffer notes;
+    notes.addEvent (juce::MidiMessage::noteOn (1, 64, 1.0f), 0);
+    proc.processBlock (block, notes);
+
+    CHECK (notes.isEmpty());
+    CHECK (proc.getSceneSelector().getActiveScene() == sceneBefore);
+    CHECK (rmsOf (block) > 0.1);
+}
+
+TEST_CASE ("Automation selects the scene and gates the wet path", "[processor][automation]")
+{
+    // The whole automation-facing interface is these two parameters: sceneSelect says which
+    // built scene plays, active says where it is heard. Both are polled on the audio thread
+    // in processChunk, so this drives real blocks rather than inspecting the engine directly.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, sampleRate, blockSize);
+    proc.prepareToPlay (sampleRate, blockSize);
+
+    auto& apvts = proc.getAPVTS();
+    auto setScene = [&] (int index)
+    {
+        auto* p = apvts.getParameter (ID::sceneSelect);
+        REQUIRE (p != nullptr);
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) index));
+    };
+    auto setActive = [&] (bool on)
+    {
+        auto* p = apvts.getParameter (ID::active);
+        REQUIRE (p != nullptr);
+        p->setValueNotifyingHost (on ? 1.0f : 0.0f);
+    };
+
+    juce::AudioBuffer<float> block (2, blockSize);
+    auto renderDc = [&] ()
     {
         for (int c = 0; c < 2; ++c)
         {
             auto* d = block.getWritePointer (c);
             for (int i = 0; i < blockSize; ++i) d[i] = 0.5f;
         }
-        juce::MidiBuffer copy (m);
-        proc.processBlock (block, copy);
+        juce::MidiBuffer midi;
+        proc.processBlock (block, midi);
         return rmsOf (block);
     };
 
-    // Gated shut still passes the dry signal: releasing a note should not punch a hole in
-    // the track.
-    CHECK (renderDc ({}) > 0.1);
-
-    juce::MidiBuffer on;
-    on.addEvent (juce::MidiMessage::noteOn (1, 60, 1.0f), 0);
-    renderDc (on);
-    CHECK (renderDc ({}) > 0.1);
-    CHECK (engine.getActiveScene() == 60);
-
-    SECTION ("MIDI is consumed rather than forwarded")
+    SECTION ("sceneSelect moves the active scene")
     {
-        // A host that received these notes back would double-trigger anything chained after.
-        juce::MidiBuffer passthrough;
-        passthrough.addEvent (juce::MidiMessage::noteOn (1, 64, 1.0f), 0);
-        block.clear();
-        proc.processBlock (block, passthrough);
-        CHECK (passthrough.isEmpty());
+        // Polled in processChunk, so it takes a block to land -- and it must land on the
+        // block it belongs to, not one later.
+        setScene (11);
+        renderDc();
+        CHECK (proc.getSceneSelector().getActiveScene() == 11);
+
+        setScene (7);
+        renderDc();
+        CHECK (proc.getSceneSelector().getActiveScene() == 7);
+    }
+
+    SECTION ("the number typed into automation is the number shown in the browser")
+    {
+        // The whole point of numbering from 1: a user reads a slot number off the browser and
+        // types that number into an automation lane. If the two ever disagree -- by an offset,
+        // or by the parameter storing something the UI translates -- the plugin becomes
+        // guesswork to automate.
+        for (const int wanted : { firstSceneIndex, 2, 24, lastSceneIndex })
+        {
+            setScene (wanted);
+            renderDc();
+
+            INFO ("typed " << wanted);
+            CHECK (proc.getSceneSelector().getActiveScene() == wanted);
+
+            // And reading the parameter back gives the same number, not a normalised value
+            // the user would have to decode.
+            auto* p = apvts.getParameter (ID::sceneSelect);
+            CHECK ((int) p->convertFrom0to1 (p->getValue()) == wanted);
+        }
+    }
+
+    SECTION ("scene 0 leaves the selection alone")
+    {
+        // An automation lane the user never wrote reads as 0. That must not drag the scene
+        // away from whatever they picked in the editor.
+        setScene (9);
+        renderDc();
+        REQUIRE (proc.getSceneSelector().getActiveScene() == 9);
+
+        setScene (noSceneIndex);
+        renderDc();
+        renderDc();
+        CHECK (proc.getSceneSelector().getActiveScene() == 9);
+    }
+
+    SECTION ("active gates the wet path without silencing the dry")
+    {
+        // Closing the gate collapses wet toward dry, never toward silence: an inactive bar
+        // must pass the source through, not punch a hole in the track.
+        setActive (false);
+        for (int i = 0; i < 8; ++i)
+            renderDc();
+        CHECK (renderDc() > 0.1);
+
+        setActive (true);
+        for (int i = 0; i < 8; ++i)
+            renderDc();
+        CHECK (renderDc() > 0.1);
+    }
+
+    SECTION ("toggling active does not click")
+    {
+        // The gate ramps over ~5ms rather than stepping. A bool parameter switches at a block
+        // boundary, so without the ramp every automation edge would be an audible tick.
+        auto& doc = proc.getSceneDocument();
+        const int scene = proc.getSceneSelector().getActiveScene();
+        for (int d = 0; d < 16; d += 2)
+            doc.addBlock (scene, StutterAudioProcessor::laneGate, d, 1);
+        doc.publish();
+
+        const int total = (int) (sampleRate * 1.0);
+        juce::AudioBuffer<float> buf (2, total);
+        fillTestSignal (buf);
+
+        bool on = true;
+        for (int off = 0; off + blockSize <= total; off += blockSize)
+        {
+            if ((off / blockSize) % 4 == 0)
+            {
+                on = ! on;
+                setActive (on);
+            }
+            juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off, blockSize);
+            juce::MidiBuffer midi;
+            proc.processBlock (chunk, midi);
+        }
+
+        CHECK (analyze (buf).severeClickCount == 0);
     }
 }
 
@@ -324,12 +441,15 @@ TEST_CASE ("APVTS mirrors the active scene", "[processor][mirror]")
 
     auto triggerScene = [&proc] (int sceneIdx)
     {
-        // Drive it the way a player would. Setting the scene directly first would make the
-        // trigger a no-op and silently skip the mirror.
-        juce::MidiBuffer m;
-        m.addEvent (juce::MidiMessage::noteOn (1, sceneIdx, 1.0f), 0);
+        // Drive it the way a host does: write the parameter, then render. Calling
+        // setActiveScene directly would bypass the polling in processChunk and prove less.
+        auto* p = proc.getAPVTS().getParameter (ID::sceneSelect);
+        REQUIRE (p != nullptr);
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) sceneIdx));
+
         juce::AudioBuffer<float> b (2, blockSize);
         b.clear();
+        juce::MidiBuffer m;
         proc.processBlock (b, m);
         proc.pumpSceneMirror();
     };
@@ -739,7 +859,7 @@ TEST_CASE ("A converted preset's blocks land on the scene the editor shows", "[p
     CHECK (scene->hasAnyBlocks());
 
     // And the engine must be playing that same scene, or it sounds like a different preset.
-    CHECK (proc.getGestureEngine().getActiveScene() == shown);
+    CHECK (proc.getSceneSelector().getActiveScene() == shown);
 }
 
 TEST_CASE ("A converted preset keeps its parameter values after mirroring", "[presets][audio]")
@@ -774,11 +894,9 @@ TEST_CASE ("A converted preset keeps its parameter values after mirroring", "[pr
                 WithinAbs (decayAfterLoad, 1.0e-4f));
 }
 
-TEST_CASE ("A MIDI note selects the scene mapped to it", "[presets][midi]")
+TEST_CASE ("Automation selects a scene from a loaded bank", "[presets][automation]")
 {
-    // The headline promise of the manual: load a bank, play a note, hear that scene. This is
-    // the default Auto mode -- the only mode a user can currently reach, since Play Mode and
-    // Scene Lock have no UI control.
+    // The headline promise of the manual: load a bank, automate Scene, hear that scene.
     StutterAudioProcessor proc;
     proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
     stutter::PresetManager pm (proc);
@@ -791,7 +909,7 @@ TEST_CASE ("A MIDI note selects the scene mapped to it", "[presets][midi]")
     pm.loadPreset (idx);
 
     // Find a populated scene that is not the one we start on.
-    const int start = proc.getGestureEngine().getActiveScene();
+    const int start = proc.getSceneSelector().getActiveScene();
     int target = -1;
     for (int i = 0; i < stutter::maxScenes && target < 0; ++i)
         if (i != start)
@@ -800,20 +918,23 @@ TEST_CASE ("A MIDI note selects the scene mapped to it", "[presets][midi]")
                     target = i;
     REQUIRE (target >= 0);
 
+    auto* p = proc.getAPVTS().getParameter (ID::sceneSelect);
+    REQUIRE (p != nullptr);
+    p->setValueNotifyingHost (p->convertTo0to1 ((float) target));
+
     juce::AudioBuffer<float> buf (2, stutter::test::blockSize);
     stutter::test::fillTestSignal (buf);
     juce::MidiBuffer midi;
-    midi.addEvent (juce::MidiMessage::noteOn (1, target, 1.0f), 0);
     proc.processBlock (buf, midi);
 
-    INFO ("note " << target << " should have selected scene " << target);
-    CHECK (proc.getGestureEngine().getActiveScene() == target);
+    INFO ("automating Scene to " << target << " should have selected it");
+    CHECK (proc.getSceneSelector().getActiveScene() == target);
 }
 
 TEST_CASE ("Switching scenes mid-playback does not click", "[presets][click]")
 {
-    // The manual tells users they can play scene changes live, so this has to hold with real
-    // factory content rather than only for the gate ramp in isolation.
+    // Automating Scene across a track is the normal way to use this, so a switch has to be
+    // silent with real factory content rather than only for the gate ramp in isolation.
     StutterAudioProcessor proc;
     proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
     stutter::PresetManager pm (proc);
@@ -849,13 +970,15 @@ TEST_CASE ("Switching scenes mid-playback does not click", "[presets][click]")
         juce::AudioBuffer<float> blk (2, n);
         for (int c = 0; c < 2; ++c) blk.copyFrom (c, 0, source, c, pos, n);
 
-        juce::MidiBuffer midi;
         if (pos / switchEvery != (pos - stutter::test::blockSize) / switchEvery)
         {
-            midi.addEvent (juce::MidiMessage::noteOn (1, populated[next % populated.size()], 1.0f), 0);
+            auto* p = proc.getAPVTS().getParameter (ID::sceneSelect);
+            p->setValueNotifyingHost (
+                p->convertTo0to1 ((float) populated[next % populated.size()]));
             ++next;
         }
 
+        juce::MidiBuffer midi;
         proc.processBlock (blk, midi);
         for (int c = 0; c < 2; ++c) out.copyFrom (c, pos, blk, c, 0, n);
     }
@@ -864,6 +987,59 @@ TEST_CASE ("Switching scenes mid-playback does not click", "[presets][click]")
     INFO ("max adjacent delta " << m.maxAdjacentDelta
           << ", severe clicks " << m.severeClickCount);
     CHECK (m.severeClickCount == 0);
+}
+
+TEST_CASE ("Host automation does not rewrite the scene document", "[processor][mirror][automation]")
+{
+    // APVTS holds a mirror of the active scene's lane values, so anything that writes a lane
+    // parameter looks identical to a knob edit. Host automation writes those parameters every
+    // block -- without telling the two apart, replaying an automation lane would bake the
+    // host's values into the scene and make them permanent on the next project save.
+    //
+    // The distinction is the gesture pair: JUCE's Slider/ComboBox attachments always wrap a
+    // drag in begin/endChangeGesture, and automation playback never does.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    doc.ensureScene (60);
+    doc.publish();
+
+    proc.getSceneSelector().setActiveScene (60);
+    proc.pumpSceneMirror();
+
+    const auto id = ID::lanePrefix (0) + ID::stutterDecay;
+    auto* param = proc.getAPVTS().getParameter (id);
+    REQUIRE (param != nullptr);
+    const auto& range = proc.getAPVTS().getParameterRange (id);
+
+    const auto* before = proc.getSceneStore().get (60);
+    REQUIRE (before != nullptr);
+    const float original = before->lanes[0].params[1];
+
+    SECTION ("automation (no gesture) leaves the scene alone")
+    {
+        param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+        proc.pumpSceneMirror();
+
+        const auto* stored = proc.getSceneStore().get (60);
+        REQUIRE (stored != nullptr);
+        CHECK_THAT (stored->lanes[0].params[1], WithinAbs (original, 1.0e-4f));
+    }
+
+    SECTION ("a UI edit (wrapped in a gesture) still reaches the scene")
+    {
+        // The other half of the contract: gating write-back must not break the edit path it
+        // was built for.
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+        param->endChangeGesture();
+        proc.pumpSceneMirror();
+
+        const auto* stored = proc.getSceneStore().get (60);
+        REQUIRE (stored != nullptr);
+        CHECK_THAT (stored->lanes[0].params[1], WithinAbs (0.85f, 1.0e-4f));
+    }
 }
 
 TEST_CASE ("A lane knob edit survives a scene round-trip", "[processor][mirror]")
@@ -879,14 +1055,20 @@ TEST_CASE ("A lane knob edit survives a scene round-trip", "[processor][mirror]"
     doc.ensureScene (61);
     doc.publish();
 
-    proc.getGestureEngine().setActiveScene (60);
+    proc.getSceneSelector().setActiveScene (60);
     proc.pumpSceneMirror();
 
     const auto id = ID::lanePrefix (0) + ID::stutterDecay;
     auto* param = proc.getAPVTS().getParameter (id);
     REQUIRE (param != nullptr);
     const auto& range = proc.getAPVTS().getParameterRange (id);
+
+    // Wrapped in a gesture because that is what turning a knob does: the attachments JUCE
+    // gives sliders and combo boxes always bracket a drag this way, and write-back only
+    // treats gestured changes as edits so host automation cannot masquerade as one.
+    param->beginChangeGesture();
     param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+    param->endChangeGesture();
 
     // Writes are deferred to the timer: parameterChanged fires on whatever thread set the
     // parameter, so it only records the value. pumpSceneMirror drives the same flush the
@@ -899,9 +1081,9 @@ TEST_CASE ("A lane knob edit survives a scene round-trip", "[processor][mirror]"
     CHECK_THAT (stored->lanes[0].params[1], WithinAbs (0.85f, 1.0e-4f));
 
     // Switch away and back, as playing two notes would.
-    proc.getGestureEngine().setActiveScene (61);
+    proc.getSceneSelector().setActiveScene (61);
     proc.pumpSceneMirror();
-    proc.getGestureEngine().setActiveScene (60);
+    proc.getSceneSelector().setActiveScene (60);
     proc.pumpSceneMirror();
 
     CHECK_THAT (proc.getAPVTS().getRawParameterValue (id)->load(), WithinAbs (0.85f, 1.0e-4f));
@@ -923,14 +1105,23 @@ TEST_CASE ("Editing one scene's knob does not leak into another", "[processor][m
     const auto& range = proc.getAPVTS().getParameterRange (id);
     auto* param = proc.getAPVTS().getParameter (id);
 
-    proc.getGestureEngine().setActiveScene (60);
+    // Gestured, because these stand in for knob turns; write-back ignores ungestured changes
+    // so that host automation cannot rewrite the scene.
+    auto turnKnob = [param, &range] (float value)
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (range.convertTo0to1 (value));
+        param->endChangeGesture();
+    };
+
+    proc.getSceneSelector().setActiveScene (60);
     proc.pumpSceneMirror();
-    param->setValueNotifyingHost (range.convertTo0to1 (0.85f));
+    turnKnob (0.85f);
     proc.pumpSceneMirror();   // flush into scene 60 before the scene changes
 
-    proc.getGestureEngine().setActiveScene (61);
+    proc.getSceneSelector().setActiveScene (61);
     proc.pumpSceneMirror();
-    param->setValueNotifyingHost (range.convertTo0to1 (0.20f));
+    turnKnob (0.20f);
     proc.pumpSceneMirror();
 
     const auto* a = proc.getSceneStore().get (60);
@@ -972,7 +1163,7 @@ TEST_CASE ("Lane mute and solo reach the audio path", "[processor][mix]")
     {
         proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
         auto& doc = proc.getSceneDocument();
-        const int scene = proc.getGestureEngine().getActiveScene();
+        const int scene = proc.getSceneSelector().getActiveScene();
         // Two lanes that each change the sound unmistakably on their own. Crush at its
         // default bit depth is nearly transparent, so using it here would make "the other
         // lane stopped" indistinguishable from "nothing happened".
@@ -1018,68 +1209,6 @@ TEST_CASE ("Lane mute and solo reach the audio path", "[processor][mix]")
     }
 }
 
-TEST_CASE ("Stick freezes the pattern where Latch keeps it running", "[processor][gesture]")
-{
-    // Stick used to set a flag nothing read, so it was audibly identical to Latch -- while
-    // the RELEASE menu offered both. Freezing pins the PPQ the sequencer sees, which stops
-    // the block cursor, the division phase and the modulation together.
-    auto renderAfterRelease = [] (stutter::ReleaseMode mode)
-    {
-        StutterAudioProcessor proc;
-        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
-        proc.getGestureEngine().setPlayMode (stutter::PlayMode::Midi);
-
-        auto& doc = proc.getSceneDocument();
-        const int scene = proc.getGestureEngine().getActiveScene();
-        auto sceneTree = doc.ensureScene (scene);
-        sceneTree.setProperty (SceneIDs::releaseMode, (int) mode, nullptr);
-
-        // A pattern whose lanes differ across the bar, so a frozen playhead and a running one
-        // cannot produce the same output.
-        // Only the first half of the bar has blocks. A running playhead leaves them behind
-        // and goes quiet; a frozen one stays on whichever division it stopped at. Gate is
-        // used throughout because it sounds in a single-division block, which Reverse does
-        // not -- a lane that is silent either way could not tell the two apart.
-        for (int d = 0; d < 8; ++d)
-            doc.addBlock (scene, StutterAudioProcessor::laneGate, d, 1);
-        doc.publish();
-
-        const int total = (int) (stutter::test::sampleRate * 2.0);
-        juce::AudioBuffer<float> buf (2, total);
-        stutter::test::fillTestSignal (buf);
-
-        for (int off = 0; off < total; off += stutter::test::blockSize)
-        {
-            const int n = juce::jmin (stutter::test::blockSize, total - off);
-            juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off, n);
-
-            juce::MidiBuffer midi;
-            if (off == 0)
-                midi.addEvent (juce::MidiMessage::noteOn (1, scene, 1.0f), 0);
-            else if (off == stutter::test::blockSize * 4)
-                midi.addEvent (juce::MidiMessage::noteOff (1, scene), 0);
-
-            proc.processBlock (chunk, midi);
-        }
-
-        // Only the tail matters: both modes are identical while the note is held.
-        double sum = 0.0;
-        for (int c = 0; c < 2; ++c)
-            for (int s = total / 2; s < total; ++s)
-                sum += std::abs (buf.getSample (c, s));
-        return sum / (double) total;
-    };
-
-    const double stick = renderAfterRelease (stutter::ReleaseMode::Stick);
-
-    const double latch = renderAfterRelease (stutter::ReleaseMode::Latch);
-
-    INFO ("Stick " << stick << ", Latch " << latch);
-    CHECK (stick > 1.0e-6);
-    CHECK (latch > 1.0e-6);
-    CHECK (std::abs (stick - latch) > latch * 0.01);
-}
-
 TEST_CASE ("Parameter changes from many threads stay safe", "[processor][mirror][threads]")
 {
     // This is what pluginval's "Parameter thread safety" test does, and it deadlocked the
@@ -1089,7 +1218,7 @@ TEST_CASE ("Parameter changes from many threads stay safe", "[processor][mirror]
     proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
     proc.getSceneDocument().ensureScene (60);
     proc.getSceneDocument().publish();
-    proc.getGestureEngine().setActiveScene (60);
+    proc.getSceneSelector().setActiveScene (60);
     proc.pumpSceneMirror();
 
     std::vector<juce::RangedAudioParameter*> params;

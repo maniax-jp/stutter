@@ -138,18 +138,25 @@ enum class LoopPolicy : uint8_t
     OneShot        ///< Play once, then stop. Not implemented.
 };
 
-/** What happens when the MIDI note that triggered a scene is released. */
+/**
+    Retired with the MIDI performance layer, which is what "release" referred to.
+
+    Nothing reads it now -- the gate is the `active` parameter's, and automation says where a
+    scene stops as directly as it says where it starts. The enum stays because scenes saved by
+    earlier versions carry the property, and dropping the type would make those files fail to
+    parse rather than simply ignoring a field that no longer means anything.
+*/
 enum class ReleaseMode : uint8_t
 {
-    OnGrid = 0,    ///< Continue to the next quantize boundary, then gate off.
-    FullGesture,   ///< Complete the current pattern loop, then gate off.
-    Latch,         ///< Ignore note-off entirely.
-    Instant,       ///< Gate off immediately (short ramp).
-    Stick          ///< Freeze on the final state.
+    OnGrid = 0,
+    FullGesture,
+    Latch,
+    Instant,
+    Stick
 };
 
 /**
-    A complete scene: everything one MIDI note recalls.
+    A complete scene: everything one automation value recalls.
 
     This is deliberately a POD of fixed extent -- no std::vector, no juce::String, no
     ValueTree. It is memcpy'd into a double-buffered bank that the audio thread reaches
@@ -204,8 +211,30 @@ struct SceneSnapshot
     }
 };
 
-/** Maximum scenes in a bank: one per MIDI note. */
+/** Bank array size. Slot 0 is deliberately unused -- see firstSceneIndex. */
 inline constexpr int maxScenes = 128;
+
+/**
+    Scenes are numbered from 1, and index 0 means "no scene".
+
+    The number is not an implementation detail the user is shielded from: they read it off the
+    browser and type it into an automation lane by hand, so the two have to be the same number.
+    Starting at 1 is what a person counting slots expects, and it leaves 0 free to mean
+    "unspecified" -- which an automation lane that was never written reads as, so an untouched
+    lane leaves the scene alone instead of yanking it to the first slot.
+
+    The cost is one wasted array entry, which is the cheapest way to buy that.
+*/
+inline constexpr int firstSceneIndex = 1;
+inline constexpr int lastSceneIndex  = maxScenes - 1;   // 127
+
+/** Index meaning "no scene selected". Automation sends this when the lane is unwritten. */
+inline constexpr int noSceneIndex = 0;
+
+/** The scene a fresh instance opens and plays. Factory content targets this, the sceneSelect
+    parameter defaults to it, and the browser scrolls to it -- they must agree, or the editor
+    shows one scene while a different one is heard. */
+inline constexpr int defaultSceneIndex = firstSceneIndex;
 
 /**
     Derive a per-trigger seed deterministically.
