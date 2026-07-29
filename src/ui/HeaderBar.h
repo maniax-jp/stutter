@@ -24,6 +24,14 @@ public:
         (the timer-driven poll would otherwise catch up within one tick anyway, but this avoids
         even a single-frame stale name flash). */
     void refreshPresetLabel();
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    /** Swap each knob's caption between its name and its current value, depending on whether
+        the mouse is over it. Cheap enough to call from the existing timer. */
+    void refreshKnobCaptions();
+
+public:
 
 private:
     void timerCallback() override;
@@ -31,6 +39,10 @@ private:
     void showPresetMenu();
     void showSaveDialog();
     void confirmDeleteUserPreset (int presetIndex);
+
+    /** Right-click menu listing only the user presets, for deleting them. Kept off the main
+        list so a destructive action is never one stray click from a load. */
+    void showUserPresetContextMenu();
 
     StutterAudioProcessor& proc;
 

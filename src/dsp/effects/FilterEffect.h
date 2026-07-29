@@ -65,7 +65,20 @@ public:
     void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
                         const SampleContext& ctx) override
     {
-        juce::ignoreUnused (capture, ctx);
+        juce::ignoreUnused (capture);
+
+        // Cutoff, resonance and LFO depth are declared continuous, so they have to be read
+        // here rather than latched at block start. Reading them only in onBlockStart made them
+        // stick for as long as a block lasted -- and a preset whose lane is on for all sixteen
+        // steps is a single block, so during playback they never refreshed at all: changing
+        // preset left the old values sounding until something re-triggered the lane.
+        // Type and LFO rate stay latched; both define structure that must not shift mid-block.
+        if (ctx.modulatedParams != nullptr)
+        {
+            cutoffHz  = ctx.modulatedParams[1];
+            resonance = juce::jlimit (0.0f, 0.99f, ctx.modulatedParams[2]);
+            lfoDepth  = juce::jlimit (0.0f, 1.0f, ctx.modulatedParams[4]);
+        }
 
         const float lfoValue = lfoDepth > 0.0f
             ? std::sin (juce::MathConstants<float>::twoPi * (float) std::fmod (lfoPhase * lfoCyclesPerStep, 1.0))

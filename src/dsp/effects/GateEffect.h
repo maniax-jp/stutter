@@ -63,7 +63,16 @@ public:
     void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
                         const SampleContext& ctx) override
     {
-        juce::ignoreUnused (capture, ctx);
+        juce::ignoreUnused (capture);
+
+        // Duty and shape are declared continuous and so are read here. Rate stays latched: it
+        // sets how many pulses fit in a division, and changing that mid-block would move the
+        // pulse edges out from under the phase already accumulated.
+        if (ctx.modulatedParams != nullptr)
+        {
+            duty  = juce::jlimit (0.01f, 0.99f, ctx.modulatedParams[1]);
+            shape = juce::jlimit (0.0f, 1.0f, ctx.modulatedParams[2]);
+        }
 
         const double pulsePhase = std::fmod (phase * pulsesPerStep, 1.0);
 

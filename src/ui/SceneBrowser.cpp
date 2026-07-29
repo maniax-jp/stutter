@@ -50,6 +50,18 @@ bool SceneBrowser::sceneHasContent (int sceneIndex) const
     return blocks.isValid() && blocks.getNumChildren() > 0;
 }
 
+void SceneBrowser::setSelectedScene (int sceneIndex)
+{
+    const int clamped = juce::jlimit (firstSceneIndex, lastSceneIndex, sceneIndex);
+    if (clamped == selectedScene)
+        return;
+
+    selectedScene = clamped;
+    if (onSceneSelected)
+        onSceneSelected (selectedScene);
+    repaint();
+}
+
 void SceneBrowser::mouseDown (const juce::MouseEvent& e)
 {
     const int scene = sceneAtPoint (e.getPosition());
@@ -103,6 +115,12 @@ void SceneBrowser::timerCallback()
     if (active != lastActiveScene)
     {
         lastActiveScene = active;
+
+        // Bring the editor along. Showing the blocks and knobs of a scene other than the one
+        // playing is only useful while the user is deliberately editing elsewhere, and there
+        // is no way to express that here -- so following what is heard is the honest default.
+        setSelectedScene (active);
+
         repaint();
     }
 }

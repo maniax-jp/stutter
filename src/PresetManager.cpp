@@ -39,6 +39,37 @@ juce::ValueTree buildDefaultParametersTree (juce::AudioProcessorValueTreeState& 
     return tree;
 }
 
+/**
+    Parameters a preset must not carry.
+
+    A preset describes a sound. `sceneSelect` and `active` describe where you are in a track --
+    which scene is up next and whether this bar is glitched -- and the host's automation lane
+    owns both. Baking them into a preset means choosing a sound silently reaches into the
+    arrangement, and it also made merely toggling ACTIVE mark the preset as edited.
+
+    They are stripped on save and ignored on load, so an existing preset that already contains
+    them behaves the same as a new one that never did.
+*/
+bool isPerformanceParam (const juce::String& paramId)
+{
+    return paramId == ID::sceneSelect || paramId == ID::active;
+}
+
+/** Remove the performance parameters from a preset's PARAMETERS node, in place. */
+void stripPerformanceParams (juce::ValueTree& state)
+{
+    for (int i = state.getNumChildren(); --i >= 0;)
+    {
+        auto child = state.getChild (i);
+        if (child.hasType ("PARAM") && isPerformanceParam (child.getProperty ("id").toString()))
+            state.removeChild (i, nullptr);
+    }
+
+    // Written by getStateInformation for project restore; a preset has no business moving the
+    // scene the user is sitting on.
+    state.removeProperty (SceneIDs::activeScene, nullptr);
+}
+
 void setParamValue (juce::ValueTree& parametersTree, const juce::String& paramId, float value)
 {
     for (int i = 0; i < parametersTree.getNumChildren(); ++i)
@@ -279,8 +310,11 @@ juce::ValueTree buildFullStateTree (StutterAudioProcessor& proc, const FactoryPr
     tree.appendChild (buildSequencerTree (def.stepsOn), nullptr);
     tree.appendChild (buildCurvesTree (def.curves), nullptr);
 
-    if (auto scenes = buildScenesTreeFromSteps (proc, def); scenes.getNumChildren() > 0)
-        tree.appendChild (scenes, nullptr);
+    // Always attach the Scenes node, even when it is empty. setStateInformation skips scene
+    // restoration entirely when the node is missing, so omitting it does not mean "no scenes"
+    // -- it means "leave the previous preset's scenes alone". Init is exactly the preset that
+    // has none, and that is how loading it used to leave the old blocks playing.
+    tree.appendChild (buildScenesTreeFromSteps (proc, def), nullptr);
 
     return tree;
 }
@@ -293,10 +327,18 @@ PresetManager::PresetManager (StutterAudioProcessor& processor) : proc (processo
     proc.getAPVTS().state.addListener (this);
 }
 
-void PresetManager::valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&)
+void PresetManager::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier&)
 {
-    if (! applyingPreset)
-        dirty = true;
+    if (applyingPreset)
+        return;
+
+    // The performance parameters are not part of a preset, so moving them cannot make one
+    // modified. Without this, merely toggling ACTIVE -- or letting the host's automation move
+    // the scene -- put a "*" next to a preset the user had not touched.
+    if (tree.hasType ("PARAM") && isPerformanceParam (tree.getProperty ("id").toString()))
+        return;
+
+    dirty = true;
 }
 
 void PresetManager::valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&)
@@ -441,6 +483,11 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
         auto scenes = FactoryScenes::createBank (entry.sceneBankIndex);
         if (! scenes.isValid())
             return {};
+
+        // buildFullStateTree always attaches a Scenes node (empty here, since `bare` has no
+        // steps). Drop it before adding the bank's: getChildWithName returns the first match,
+        // so leaving both would hand the restore the empty one and load a silent preset.
+        tree.removeChild (tree.getChildWithName (SceneIDs::scenesNode), nullptr);
         tree.appendChild (scenes, nullptr);
         return tree;
     }
@@ -461,6 +508,11 @@ void PresetManager::loadPreset (int index)
     if (! state.isValid())
         return;
 
+    // Ignore them on load as well as on save, so presets written before this rule -- and the
+    // factory definitions, which are built from a full default parameter tree -- cannot move
+    // the scene or flip ACTIVE either.
+    stripPerformanceParams (state);
+
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     juce::MemoryBlock block;
     juce::AudioProcessor::copyXmlToBinary (*xml, block);
@@ -475,6 +527,11 @@ void PresetManager::loadPreset (int index)
     currentIndex = index;
     dirty = false;
     deletedCurrentPresetName.clear();
+
+    // Mirror now rather than waiting for the processor's timer. Both are message-thread work,
+    // and doing it here means onPresetLoaded below -- which repaints the editor -- reads the
+    // new preset's values instead of the previous one's for the next tick.
+    proc.pumpSceneMirror();
 
     if (onPresetLoaded)
         onPresetLoaded();
@@ -520,6 +577,17 @@ void PresetManager::saveUserPreset (const juce::String& presetName)
     std::unique_ptr<juce::XmlElement> xml (juce::AudioProcessor::getXmlFromBinary (block.getData(), (int) block.getSize()));
     if (xml == nullptr)
         return;
+
+    // A preset is a sound, not a position in the arrangement: strip the performance
+    // parameters so recalling it never moves the scene or silences the plugin.
+    {
+        auto tree = juce::ValueTree::fromXml (*xml);
+        if (tree.isValid())
+        {
+            stripPerformanceParams (tree);
+            xml.reset (tree.createXml().release());
+        }
+    }
 
     auto dir = getUserPresetDirectory();
     auto file = dir.getChildFile (juce::File::createLegalFileName (trimmed) + kUserPresetFileExtension);

@@ -48,13 +48,18 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
     processorRef.getPresetManager().onPresetLoaded = [this]
     {
         headerBar.refreshPresetLabel();
+
+        // Point the editor at the scene the preset actually landed on before repainting
+        // anything. Reusing the previously selected scene left the grid and knobs showing the
+        // old preset until the user happened to click a scene cell.
+        sceneBrowser.setSelectedScene (processorRef.getSceneSelector().getActiveScene());
+
         blockGrid.repaint();
         sceneBrowser.repaint();
         bottomTabs.refreshAfterPresetLoad();
 
-        // A preset carries Play Mode / Scene Lock / quantize and each scene's Release mode, so
-        // these have to be re-read rather than repainted -- combo boxes show their own state,
-        // not the model's.
+        // Grid geometry and swing are per-scene, so these have to be re-read rather than
+        // repainted -- combo boxes show their own state, not the model's.
         performanceBar.setSceneIndex (sceneBrowser.getSelectedScene());
         performanceBar.refresh();
     };

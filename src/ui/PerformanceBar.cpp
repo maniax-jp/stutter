@@ -9,8 +9,11 @@ namespace
 {
 void styleCaption (juce::Label& l)
 {
+    // Same size and spacing as the header's knob captions (DRY/WET, OUTPUT). These used to
+    // carry extra kerning, which widened the text past its fixed-width label and got it
+    // elided to "..." as soon as the window was scaled up.
     l.setJustificationType (juce::Justification::centredLeft);
-    l.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::plain)).withExtraKerningFactor (0.12f));
+    l.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
     l.setColour (juce::Label::textColourId, Palette::textLo);
 }
 
@@ -189,13 +192,14 @@ void PerformanceBar::resized()
     r.removeFromLeft (18);
 
     // Grid: beats x divisions reads as one control, so the two boxes stay tight around the "x".
-    gridLabel.setBounds (r.removeFromLeft (30));
+    // The caption widths carry a few pixels of slack past the text so nothing elides.
+    gridLabel.setBounds (r.removeFromLeft (38));
     beatsBox.setBounds (r.removeFromLeft (46).reduced (0, 3));
     gridTimesLabel.setBounds (r.removeFromLeft (16));
     divisionsBox.setBounds (r.removeFromLeft (46).reduced (0, 3));
     r.removeFromLeft (12);
 
-    swingLabel.setBounds (r.removeFromLeft (38));
+    swingLabel.setBounds (r.removeFromLeft (48));
     swingSlider.setBounds (r.removeFromLeft (150).reduced (0, 2));
 }
 

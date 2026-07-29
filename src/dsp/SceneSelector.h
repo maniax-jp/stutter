@@ -59,6 +59,22 @@ public:
             pendingMirrorScene.store (clamped, std::memory_order_release);
     }
 
+    /**
+        Select a scene and mirror it even if the number did not change.
+
+        For when the *contents* of a scene were replaced under a number that stayed the same --
+        loading a preset, most obviously. Every factory bank starts at scene 1 and the plugin
+        already sits on scene 1, so the unchanged-value skip above would suppress the mirror
+        exactly when it is needed most: the audio path would play the new preset while every
+        knob still showed the old one, until the user happened to click another scene.
+    */
+    void setActiveSceneAndMirror (int index) noexcept
+    {
+        const int clamped = juce::jlimit (firstSceneIndex, lastSceneIndex, index);
+        activeScene.store (clamped, std::memory_order_relaxed);
+        pendingMirrorScene.store (clamped, std::memory_order_release);
+    }
+
     int getActiveScene() const noexcept { return activeScene.load (std::memory_order_relaxed); }
 
     /** Set when the scene changes; the processor's timer reads it to mirror the new scene's

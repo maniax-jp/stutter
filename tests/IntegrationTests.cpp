@@ -90,6 +90,69 @@ TEST_CASE ("Loading Init resets every curve to neutral", "[processor][presets]")
     CHECK (curveIsNeutral (ModTarget::Pan,    ID::neutralValueForCurve (ID::curveNamePan)));
 }
 
+TEST_CASE ("Loading Init clears the previous preset's scenes", "[processor][presets]")
+{
+    // Init means "nothing is happening". buildFullStateTree used to omit the Scenes node when
+    // a preset had no steps, and setStateInformation reads a missing node as "leave the scenes
+    // alone" rather than "there are none" -- so Init reset the parameters and curves while the
+    // previous preset's blocks kept playing underneath.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, sampleRate, blockSize);
+    proc.prepareToPlay (sampleRate, blockSize);
+
+    auto& pm = proc.getPresetManager();
+    auto indexOf = [&pm] (const juce::String& name)
+    {
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == name)
+                return i;
+        return -1;
+    };
+
+    const int trance = indexOf ("Trance Gate 16th");
+    const int init   = indexOf ("Init");
+    REQUIRE (trance >= 0);
+    REQUIRE (init >= 0);
+
+    auto blocksInBank = [&proc]
+    {
+        int n = 0;
+        for (int i = 0; i < maxScenes; ++i)
+            if (const auto* s = proc.getSceneStore().get (i))
+                for (int l = 0; l < maxLanes; ++l)
+                    n += s->lanes[(size_t) l].numBlocks;
+        return n;
+    };
+
+    pm.loadPreset (trance);
+    REQUIRE (blocksInBank() > 0);
+
+    pm.loadPreset (init);
+    CHECK (blocksInBank() == 0);
+
+    // And it is actually silent, not merely empty on paper.
+    const int total = (int) (sampleRate * 0.5);
+    juce::AudioBuffer<float> buf (2, total);
+    fillTestSignal (buf);
+    juce::AudioBuffer<float> dry (2, total);
+    for (int c = 0; c < 2; ++c) dry.copyFrom (c, 0, buf, c, 0, total);
+
+    for (int off = 0; off + blockSize <= total; off += blockSize)
+    {
+        juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off, blockSize);
+        juce::MidiBuffer midi;
+        proc.processBlock (chunk, midi);
+    }
+
+    double maxDiff = 0.0;
+    for (int c = 0; c < 2; ++c)
+        for (int i = 0; i < total; ++i)
+            maxDiff = juce::jmax (maxDiff, std::abs ((double) buf.getSample (c, i)
+                                                     - (double) dry.getSample (c, i)));
+    INFO ("max sample difference after Init: " << maxDiff);
+    CHECK (maxDiff < 0.01);
+}
+
 TEST_CASE ("Malformed curve state falls back to neutral", "[processor][state]")
 {
     // Each fixture is a way a curve node can be broken. The point is that a truncated or
@@ -766,6 +829,238 @@ TEST_CASE ("Every factory scene bank reaches the audio path", "[presets][scenes]
 
     CHECK (banksSeen == FactoryScenes::getNumBanks());
 }
+
+TEST_CASE ("Loading a preset mirrors its values without needing a click", "[presets][mirror]")
+{
+    // APVTS mirrors the active scene, and the mirror only ran when the scene *number* changed.
+    // Every factory bank starts at scene 1 and the plugin already sits on scene 1, so loading
+    // a preset skipped the mirror entirely: the new preset played while every knob still
+    // showed the old one, until the user happened to click a different scene.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    auto indexOf = [&pm] (const juce::String& name)
+    {
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == name)
+                return i;
+        return -1;
+    };
+
+    // Two presets that drive the same lane parameter to values far enough apart that a stale
+    // mirror cannot be mistaken for a fresh one.
+    const int crusher = indexOf ("LoFi Crusher");
+    const int trance  = indexOf ("Trance Gate 16th");
+    REQUIRE (crusher >= 0);
+    REQUIRE (trance >= 0);
+
+    // Compare the knob against what the scene the preset just published actually holds. Both
+    // presets land on scene 1, which is exactly the case the unchanged-value skip suppressed.
+    auto sceneValue = [&proc] (int lane, int paramIndex)
+    {
+        const auto* s = proc.getSceneStore().get (proc.getSceneSelector().getActiveScene());
+        REQUIRE (s != nullptr);
+        return s->lanes[(size_t) lane].params[(size_t) paramIndex];
+    };
+
+    auto knobValue = [&proc] (int lane, const juce::String& paramName)
+    {
+        const auto id = ID::lanePrefix (lane) + paramName;
+        auto* raw = proc.getAPVTS().getRawParameterValue (id);
+        REQUIRE (raw != nullptr);
+        return raw->load();
+    };
+
+    // Render blocks around the switch, the way a DAW does. This is where the bug lived: the
+    // audio thread polls sceneSelect every block, and a preset load that left the parameter
+    // sitting at its old value would have the poll immediately undo the scene the load had
+    // just resolved.
+    juce::AudioBuffer<float> block (2, stutter::test::blockSize);
+    auto renderOneBlock = [&]
+    {
+        block.clear();
+        juce::MidiBuffer midi;
+        proc.processBlock (block, midi);
+    };
+
+    pm.loadPreset (crusher);
+    renderOneBlock();
+    proc.pumpSceneMirror();
+    const float crusherScene = sceneValue (StutterAudioProcessor::laneCrush, 0);
+    const float crusherKnob  = knobValue (StutterAudioProcessor::laneCrush, ID::crushBitDepth);
+
+    pm.loadPreset (trance);
+    renderOneBlock();
+    proc.pumpSceneMirror();
+    const float tranceScene = sceneValue (StutterAudioProcessor::laneCrush, 0);
+    const float tranceKnob  = knobValue (StutterAudioProcessor::laneCrush, ID::crushBitDepth);
+
+    // The two presets must disagree about crush depth, or this proves nothing.
+    INFO ("crusher scene " << crusherScene << " knob " << crusherKnob
+          << " / trance scene " << tranceScene << " knob " << tranceKnob);
+    REQUIRE_FALSE (juce::approximatelyEqual (crusherScene, tranceScene));
+
+    // Each knob has to match the scene that was live when it was read.
+    CHECK_THAT (crusherKnob, WithinAbs (crusherScene, 1.0e-3f));
+    CHECK_THAT (tranceKnob,  WithinAbs (tranceScene, 1.0e-3f));
+}
+
+
+TEST_CASE ("Continuous lane parameters take effect without re-triggering", "[processor][params]")
+{
+    // Parameters declared continuous have to be read every sample, not latched when a block
+    // fires. A lane that is on for the whole bar is one block, so during playback it never
+    // re-triggers -- and while those parameters were latched, changing them (by loading a
+    // preset, or by automation) did nothing at all until something made the lane fire again.
+    // Clicking in the editor did exactly that, which is why the values "appeared" on a click.
+    struct Case { const char* name; int lane; const char* paramId; float a; float b; };
+
+    const Case cases[] = {
+        { "Crush rate div",     StutterAudioProcessor::laneCrush,  ID::crushRateDiv.toRawUTF8(),     0.0f,  0.9f },
+        { "Filter resonance",   StutterAudioProcessor::laneFilter, ID::filterResonance.toRawUTF8(),  0.0f,  0.95f },
+        { "Gate duty",          StutterAudioProcessor::laneGate,   ID::gateDuty.toRawUTF8(),         0.1f,  0.9f },
+    };
+
+    for (const auto& c : cases)
+    {
+        INFO (c.name);
+
+        StutterAudioProcessor proc;
+        proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+        // One block covering the whole bar, exactly like the presets that showed the bug.
+        auto& doc = proc.getSceneDocument();
+        const int scene = proc.getSceneSelector().getActiveScene();
+        doc.addBlock (scene, c.lane, 0, 16);
+        doc.publish();
+
+        const auto paramId = ID::lanePrefix (c.lane) + c.paramId;
+
+        auto renderWith = [&] (float value)
+        {
+            // Set it the way a knob does -- gestured, so write-back carries it into the scene.
+            auto* p = proc.getAPVTS().getParameter (paramId);
+            REQUIRE (p != nullptr);
+            const auto& range = proc.getAPVTS().getParameterRange (paramId);
+            p->beginChangeGesture();
+            p->setValueNotifyingHost (range.convertTo0to1 (value));
+            p->endChangeGesture();
+            proc.pumpSceneMirror();
+
+            const int total = (int) (stutter::test::sampleRate * 0.5);
+            juce::AudioBuffer<float> buf (2, total);
+            stutter::test::fillTestSignal (buf);
+
+            for (int off = 0; off + stutter::test::blockSize <= total; off += stutter::test::blockSize)
+            {
+                juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off,
+                                                stutter::test::blockSize);
+                juce::MidiBuffer midi;
+                proc.processBlock (chunk, midi);
+            }
+            return rmsOf (buf);
+        };
+
+        // Render once at each value *without* ever letting the lane re-trigger in between.
+        const double atA = renderWith (c.a);
+        const double atB = renderWith (c.b);
+
+        INFO ("rms at " << c.a << " = " << atA << ", at " << c.b << " = " << atB);
+        CHECK (std::abs (atA - atB) > 1.0e-4);
+    }
+}
+
+TEST_CASE ("Presets carry a sound, not a position in the arrangement", "[presets][automation]")
+{
+    // sceneSelect and active belong to the host's automation lane, not to a preset. Baking
+    // them in meant choosing a sound silently jumped the scene and forced ACTIVE back on --
+    // and merely toggling ACTIVE marked the preset as edited.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    auto& pm = proc.getPresetManager();
+
+    auto indexOf = [&pm] (const juce::String& name)
+    {
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == name)
+                return i;
+        return -1;
+    };
+
+    auto setParam = [&proc] (const juce::String& id, float value)
+    {
+        auto* p = proc.getAPVTS().getParameter (id);
+        REQUIRE (p != nullptr);
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+    };
+    auto getParam = [&proc] (const juce::String& id)
+    {
+        auto* raw = proc.getAPVTS().getRawParameterValue (id);
+        REQUIRE (raw != nullptr);
+        return raw->load();
+    };
+
+    SECTION ("toggling ACTIVE does not mark the preset dirty")
+    {
+        const int init = indexOf ("Init");
+        REQUIRE (init >= 0);
+        pm.loadPreset (init);
+        REQUIRE_FALSE (pm.isDirty());
+
+        setParam (ID::active, 0.0f);
+        CHECK_FALSE (pm.isDirty());
+
+        setParam (ID::active, 1.0f);
+        CHECK_FALSE (pm.isDirty());
+    }
+
+    SECTION ("loading a preset leaves ACTIVE and the scene where the user put them")
+    {
+        setParam (ID::sceneSelect, 9.0f);
+        setParam (ID::active, 0.0f);
+
+        const int crusher = indexOf ("LoFi Crusher");
+        REQUIRE (crusher >= 0);
+        pm.loadPreset (crusher);
+
+        CHECK ((int) getParam (ID::sceneSelect) == 9);
+        CHECK (getParam (ID::active) < 0.5f);
+
+        // And it survives the block that follows, which is where processChunk polls.
+        juce::AudioBuffer<float> block (2, stutter::test::blockSize);
+        block.clear();
+        juce::MidiBuffer midi;
+        proc.processBlock (block, midi);
+
+        CHECK (proc.getSceneSelector().getActiveScene() == 9);
+    }
+
+    SECTION ("a project restore still returns to its saved scene")
+    {
+        // The exclusion is a preset rule, not a state rule: reopening a project has to land
+        // where it was left.
+        auto& doc = proc.getSceneDocument();
+        doc.ensureScene (4);
+        doc.addBlock (4, StutterAudioProcessor::laneGate, 0, 4);
+        doc.publish();
+        setParam (ID::sceneSelect, 4.0f);
+
+        juce::MemoryBlock saved;
+        proc.getStateInformation (saved);
+
+        StutterAudioProcessor restored;
+        restored.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+        restored.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        restored.setStateInformation (saved.getData(), (int) saved.getSize());
+
+        CHECK (restored.getSceneSelector().getActiveScene() == 4);
+    }
+}
+
 
 TEST_CASE ("A freshly loaded preset is not marked dirty", "[presets][ui]")
 {

@@ -430,7 +430,14 @@ TEST_CASE ("A restored scene survives the sceneSelect parameter's default", "[st
                 target = i;
 
     REQUIRE (target >= 0);
-    proc.getSceneSelector().setActiveScene (target);
+    // Move it the way anything real does -- the browser and the host both write the parameter,
+    // and the parameter is what a save records. Poking the engine directly would test a path
+    // no user can reach.
+    {
+        auto* p = proc.getAPVTS().getParameter (ID::sceneSelect);
+        REQUIRE (p != nullptr);
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) target));
+    }
 
     juce::MemoryBlock saved;
     proc.getStateInformation (saved);

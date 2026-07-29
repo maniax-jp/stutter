@@ -17,6 +17,7 @@
 #include "dsp/ParameterLayout.h"
 #include "state/SceneSchema.h"
 #include <array>
+#include <optional>
 
 using namespace stutter;
 
@@ -536,7 +537,12 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 
     // Which scene was live, so reopening a project returns to it rather than to whichever
     // scene happens to come first in the bank.
-    state.setProperty (stutter::SceneIDs::activeScene, sceneSelector.getActiveScene(), nullptr);
+    // Written from the parameter, not from the engine: the engine only catches up on the next
+    // processBlock, so saving straight after an automation move would record the previous
+    // scene. Kept for sessions read by builds that predate the sceneSelect parameter -- the
+    // parameter itself is already in the copied state above and is what the restore prefers.
+    state.setProperty (stutter::SceneIDs::activeScene,
+                       (int) apvts.getRawParameterValue (stutter::ID::sceneSelect)->load(), nullptr);
 
     juce::ValueTree curvesTree (ID::curvesNode);
     static const juce::Identifier curveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
@@ -591,8 +597,24 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
         // Land on a scene that actually exists, so a freshly loaded bank makes a sound rather
         // than sitting on an empty slot and looking broken on first contact. An explicitly
-        // saved activeScene wins, so reopening a project returns to whatever the user was on.
-        const int savedActive = (int) newState.getProperty (stutter::SceneIDs::activeScene, -1);
+        // saved scene wins, so reopening a project returns to whatever the user was on.
+        //
+        // The sceneSelect parameter is the source of truth and is checked first; the
+        // activeScene property is the fallback for sessions written before the parameter
+        // existed. Preferring the property would lose a scene chosen by automation but not yet
+        // polled by the audio thread -- saving right after the change would store a stale 1.
+        int savedActive = -1;
+        for (int i = 0; i < newState.getNumChildren() && savedActive < 0; ++i)
+        {
+            auto child = newState.getChild (i);
+            if (child.hasType ("PARAM")
+                && child.getProperty ("id").toString() == stutter::ID::sceneSelect)
+                savedActive = (int) (float) child.getProperty ("value");
+        }
+
+        if (savedActive < stutter::firstSceneIndex)
+            savedActive = (int) newState.getProperty (stutter::SceneIDs::activeScene, -1);
+
         int target = savedActive;
 
         if (target < stutter::firstSceneIndex
@@ -608,7 +630,11 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
         if (target >= 0)
         {
-            sceneSelector.setActiveScene (target);
+            // Mirror unconditionally: the scene *contents* just changed, even when the number
+            // did not. Every factory bank starts at scene 1 and the plugin is usually already
+            // on scene 1, so the ordinary setActiveScene would skip the mirror and leave every
+            // knob showing the previous preset while the new one played.
+            sceneSelector.setActiveSceneAndMirror (target);
             restoredScene = target;
         }
     }
@@ -633,7 +659,42 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
     paramsOnlyState.removeChild (paramsOnlyState.getChildWithName (ID::sequencerNode), nullptr);
     paramsOnlyState.removeChild (paramsOnlyState.getChildWithName (ID::curvesNode), nullptr);
 
+    // The performance parameters survive a state that does not mention them. replaceState
+    // resets anything absent to its default, and presets deliberately omit these two -- so
+    // without this, choosing a preset would jump the scene back to the first slot and force
+    // ACTIVE on, overriding both the user's choice and the host's automation.
+    //
+    // A project restore is different: it saves them, so the values below get replaced anyway.
+    auto carryOver = [this, &paramsOnlyState] (const juce::String& id)
+    {
+        for (int i = 0; i < paramsOnlyState.getNumChildren(); ++i)
+        {
+            auto child = paramsOnlyState.getChild (i);
+            if (child.hasType ("PARAM") && child.getProperty ("id").toString() == id)
+                return std::optional<float> {};   // present: let the state win
+        }
+
+        if (auto* raw = apvts.getRawParameterValue (id))
+            return std::optional<float> { raw->load() };
+
+        return std::optional<float> {};
+    };
+
+    const auto keptScene  = carryOver (stutter::ID::sceneSelect);
+    const auto keptActive = carryOver (stutter::ID::active);
+
     apvts.replaceState (paramsOnlyState);
+
+    auto restore = [this] (const juce::String& id, const std::optional<float>& value)
+    {
+        if (! value.has_value())
+            return;
+        if (auto* p = apvts.getParameter (id))
+            p->setValueNotifyingHost (p->convertTo0to1 (*value));
+    };
+
+    restore (stutter::ID::sceneSelect, keptScene);
+    restore (stutter::ID::active, keptActive);
 
     // Always route through fromValueTree(), even when sequencerTree/curvesTree (or an individual
     // curve within it) is missing -- StepSequencer::fromValueTree() clears the grid up front, and
@@ -666,8 +727,12 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
     // reset sceneSelect to its default for any session saved before the parameter existed,
     // and processChunk polls that parameter every block -- without this, the scene resolved
     // above would be overwritten by the default on the very next block, and every older
-    // project would open on scene 60 regardless of what was saved.
-    if (restoredScene >= 0)
+    // project would open on the default scene regardless of what was saved.
+    //
+    // Skipped when keptScene carried a value: that means the state said nothing about which
+    // scene to be on, which is what a preset looks like. Presets choose a sound, not a
+    // position in the arrangement, so the scene the user (or the host) is on stays put.
+    if (restoredScene >= 0 && ! keptScene.has_value())
         if (auto* p = apvts.getParameter (stutter::ID::sceneSelect))
             p->setValueNotifyingHost (p->convertTo0to1 ((float) restoredScene));
 }

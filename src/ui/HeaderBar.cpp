@@ -39,6 +39,7 @@ HeaderBar::HeaderBar (StutterAudioProcessor& processor) : proc (processor)
         addAndMakeVisible (*b);
 
     presetNameButton.onClick = [this] { showPresetMenu(); };
+    presetNameButton.addMouseListener (this, false);
     addAndMakeVisible (presetNameButton);
 
     presetSaveButton.onClick = [this] { showSaveDialog(); };
@@ -53,6 +54,12 @@ HeaderBar::HeaderBar (StutterAudioProcessor& processor) : proc (processor)
     addAndMakeVisible (dryWetLabel);
     dryWetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         proc.getAPVTS(), ID::dryWet, dryWetKnob);
+
+    // These knobs have no text box -- the caption beneath them is the only space available, so
+    // hovering swaps the name for the value and leaving puts the name back. Showing the number
+    // permanently would leave the header reading as a row of anonymous digits.
+    dryWetKnob.onValueChange = [this] { refreshKnobCaptions(); };
+    outputKnob.onValueChange = [this] { refreshKnobCaptions(); };
 
     // ---- Output knob ----
     outputKnob.setColour (juce::Slider::rotarySliderFillColourId, Palette::laneColours[6]);
@@ -108,8 +115,31 @@ HeaderBar::HeaderBar (StutterAudioProcessor& processor) : proc (processor)
 
 HeaderBar::~HeaderBar() { stopTimer(); }
 
+void HeaderBar::refreshKnobCaptions()
+{
+    // isMouseOver(true) includes the knob's children, so the whole control counts as hovered
+    // rather than just the pixels the rotary happens to paint.
+    const bool overDryWet = dryWetKnob.isMouseOver (true);
+    const bool overOutput = outputKnob.isMouseOver (true);
+
+    // Percent for a 0..1 mix, dB for a gain: the unit a user would say out loud.
+    dryWetLabel.setText (overDryWet
+                             ? juce::String (juce::roundToInt (dryWetKnob.getValue() * 100.0)) + "%"
+                             : "DRY/WET",
+                         juce::dontSendNotification);
+
+    // Explicit sign so "+3.0 dB" cannot be misread as a cut.
+    const double gain = outputKnob.getValue();
+    outputLabel.setText (overOutput
+                             ? (gain >= 0.0 ? "+" : "") + juce::String (gain, 1) + " dB"
+                             : "OUTPUT",
+                         juce::dontSendNotification);
+}
+
 void HeaderBar::timerCallback()
 {
+    refreshKnobCaptions();
+
     const double bpm = proc.getDisplayBpm();
     const bool synced = proc.isDisplayHostSynced();
 
@@ -184,12 +214,8 @@ void HeaderBar::showPresetMenu()
     auto& pm = proc.getPresetManager();
     const auto& presets = pm.getPresets();
 
-    // Two disjoint ID ranges packed into one PopupMenu, since showMenuAsync's callback only gets
-    // a single result ID back for the whole menu (including submenu items): [1, N] load a preset
-    // at (id - 1); [deleteIdBase, deleteIdBase + N) delete the user preset at (id - deleteIdBase).
-    // deleteIdBase is chosen comfortably above any realistic preset count.
-    constexpr int deleteIdBase = 100000;
-
+    // One ID range: item (i + 1) loads preset i. PopupMenu reserves 0 for "nothing chosen".
+    // Deleting is not offered here at all -- see showUserPresetContextMenu.
     juce::PopupMenu menu;
     juce::String currentCategory;
     int itemId = 1; // PopupMenu item IDs must be non-zero
@@ -203,22 +229,12 @@ void HeaderBar::showPresetMenu()
             menu.addSectionHeader (currentCategory);
         }
 
-        const bool isCurrent = (i == pm.getCurrentIndex());
-
-        if (entry.isFactory)
-        {
-            menu.addItem (itemId, entry.name, true, isCurrent);
-        }
-        else
-        {
-            // User preset: clicking the row loads it (as before); a submenu carries the
-            // destructive "Delete..." action so it isn't a stray click away from loading.
-            juce::PopupMenu userItemMenu;
-            userItemMenu.addItem (itemId, "Load", true, isCurrent);
-            userItemMenu.addSeparator();
-            userItemMenu.addItem (deleteIdBase + i, "Delete...");
-            menu.addSubMenu (entry.name + (isCurrent ? "  (current)" : ""), userItemMenu);
-        }
+        // User and factory rows behave identically: one click loads, and the current one is
+        // ticked. Putting user presets behind a Load/Delete submenu made the common action
+        // (load) cost an extra step in order to shelter the rare one (delete) -- and it also
+        // hid the tick, so there was no way to see which user preset was loaded.
+        // Delete lives on the right-click menu instead; see mouseDown.
+        menu.addItem (itemId, entry.name, true, i == pm.getCurrentIndex());
 
         ++itemId;
     }
@@ -229,18 +245,54 @@ void HeaderBar::showPresetMenu()
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton),
         [safeThis] (int result)
         {
-            if (result <= 0)
+            if (result <= 0 || safeThis == nullptr)
                 return;
-            if (safeThis == nullptr)
-                return;
-
-            if (result >= deleteIdBase)
-            {
-                safeThis->confirmDeleteUserPreset (result - deleteIdBase);
-                return;
-            }
 
             safeThis->proc.getPresetManager().loadPreset (result - 1);
+        });
+}
+
+void HeaderBar::mouseDown (const juce::MouseEvent& e)
+{
+    // Registered as a listener on the preset button, so this fires for clicks landing on it as
+    // well as on the bar itself. Only the right button is of interest -- the left one is the
+    // button's own onClick.
+    if (e.mods.isPopupMenu() && e.eventComponent == &presetNameButton)
+        showUserPresetContextMenu();
+}
+
+void HeaderBar::showUserPresetContextMenu()
+{
+    auto& pm = proc.getPresetManager();
+    const auto& presets = pm.getPresets();
+
+    juce::PopupMenu menu;
+    int shown = 0;
+
+    for (int i = 0; i < (int) presets.size(); ++i)
+    {
+        if (presets[(size_t) i].isFactory)
+            continue;
+
+        // ID is the preset index + 1; PopupMenu treats 0 as "nothing chosen".
+        menu.addItem (i + 1, "Delete \"" + presets[(size_t) i].name + "\"...");
+        ++shown;
+    }
+
+    if (shown == 0)
+    {
+        menu.addItem (1, "No user presets", false, false);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton));
+        return;
+    }
+
+    juce::Component::SafePointer<HeaderBar> safeThis (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton),
+        [safeThis] (int result)
+        {
+            if (result <= 0 || safeThis == nullptr)
+                return;
+            safeThis->confirmDeleteUserPreset (result - 1);
         });
 }
 

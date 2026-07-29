@@ -51,7 +51,20 @@ public:
     void processSample (const CaptureBuffer& capture, float* channelSamples, int numCh,
                         const SampleContext& ctx) override
     {
-        juce::ignoreUnused (capture, ctx);
+        juce::ignoreUnused (capture);
+
+        // Both parameters are declared continuous, so they are read here rather than latched
+        // at block start. Latching them meant a lane that is on for the whole bar -- one block,
+        // never re-triggered during playback -- kept whatever values were current when it
+        // started, so changing preset did not change the sound until the lane fired again.
+        if (ctx.modulatedParams != nullptr)
+        {
+            bitDepth = juce::jlimit (1.0f, 16.0f, ctx.modulatedParams[0]);
+
+            // rateDiv 0..1 maps to a hold length of 1..40 samples (the downsample factor).
+            const float rateDivParam = juce::jlimit (0.0f, 1.0f, ctx.modulatedParams[1]);
+            holdLength = juce::jmax (1, (int) std::round (1.0f + rateDivParam * 39.0f));
+        }
 
         const bool sampleNow = (holdCounter % holdLength) == 0;
         const float levels = std::pow (2.0f, bitDepth) - 1.0f;

@@ -37,10 +37,15 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override;
 
-    /** Fired when the user picks a scene to edit. */
+    /** Fired when the scene being edited changes, however it changed. */
     std::function<void (int sceneIndex)> onSceneSelected;
 
     int getSelectedScene() const noexcept { return selectedScene; }
+
+    /** Point the editor at a scene without a click -- used when automation or a preset load
+        moves the scene, so the grid and knobs below follow what is actually being heard
+        instead of staying on whatever was last clicked. Fires onSceneSelected. */
+    void setSelectedScene (int sceneIndex);
 
 private:
     void timerCallback() override;
