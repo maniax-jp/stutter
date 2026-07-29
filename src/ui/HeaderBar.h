@@ -24,7 +24,6 @@ public:
         (the timer-driven poll would otherwise catch up within one tick anyway, but this avoids
         even a single-frame stale name flash). */
     void refreshPresetLabel();
-    void mouseDown (const juce::MouseEvent&) override;
 
 private:
     /** Swap each knob's caption between its name and its current value, depending on whether
@@ -40,9 +39,9 @@ private:
     void showSaveDialog();
     void confirmDeleteUserPreset (int presetIndex);
 
-    /** Right-click menu listing only the user presets, for deleting them. Kept off the main
-        list so a destructive action is never one stray click from a load. */
-    void showUserPresetContextMenu();
+    /** Set by a user-preset row in the preset menu when the click that dismissed the menu was
+        a right-click, so the callback can route that row to Delete instead of Load. */
+    bool rightClickedInPresetMenu = false;
 
     StutterAudioProcessor& proc;
 

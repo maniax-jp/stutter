@@ -174,10 +174,19 @@ namespace SceneSchema
         repitch goes negative. Clamping everything to 0..1 silently collapsed those the moment
         a curve was routed to them, which is what made a swept filter go silent.
     */
-    void setLaneRanges (int lane, const float* minValues, const float* maxValues, int count);
+    void setLaneRanges (int lane, const float* minValues, const float* maxValues,
+                        const float* skews, int count);
 
-    /** A parameter's registered range, or {0, 1} when nothing was registered. */
-    void getLaneRange (int lane, int paramIndex, float& minOut, float& maxOut);
+    /**
+        A parameter's registered range and skew, or {0, 1, 1} when nothing was registered.
+
+        The skew matters as much as the bounds: filter cutoff spans 20Hz..20kHz with a skew of
+        0.3, so the midpoint of a curve is ~1kHz, not the ~10kHz a linear reading would give.
+        Mapping a curve linearly onto that range sweeps the cutoff through the top of the
+        spectrum far faster than intended, and at high resonance that is enough to make the
+        filter self-oscillate into a blast of noise.
+    */
+    void getLaneRange (int lane, int paramIndex, float& minOut, float& maxOut, float& skewOut);
 
     /** Clear all registered defaults and ranges. Tests use this to isolate. */
     void clearLaneDefaults();

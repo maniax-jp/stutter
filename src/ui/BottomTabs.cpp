@@ -34,6 +34,45 @@ BottomTabs::BottomTabs (StutterAudioProcessor& processor)
     addChildComponent (modRoutePanel);
 
     selectTab (Tab::Lane);
+
+    // 8Hz is plenty: this only has to catch a curve being drawn or a preset changing one, and
+    // both are human-speed events.
+    startTimerHz (8);
+    refreshCurveTabIndicators();
+}
+
+void BottomTabs::timerCallback()
+{
+    refreshCurveTabIndicators();
+}
+
+void BottomTabs::refreshCurveTabIndicators()
+{
+    struct Entry { ModTarget target; const char* name; CurveTabButton* button; };
+    const Entry entries[] = {
+        { ModTarget::Volume, ID::curveNameVolume.toRawUTF8(), &volumeTabButton },
+        { ModTarget::Filter, ID::curveNameFilter.toRawUTF8(), &filterTabButton },
+        { ModTarget::Pan,    ID::curveNamePan.toRawUTF8(),    &panTabButton },
+    };
+
+    for (const auto& e : entries)
+    {
+        const auto& curve = proc.getCurve (e.target);
+        const float neutral = ID::neutralValueForCurve (e.name);
+
+        // "Doing something" means the shape departs from its own neutral value somewhere.
+        // Sampling a handful of phases is enough to catch any curve a person would draw, and
+        // avoids walking the whole baked table eight times a second.
+        bool active = false;
+        for (int i = 0; i < 16 && ! active; ++i)
+            active = std::abs (curve.getValueAtPhase ((float) i / 16.0f) - neutral) > 1.0e-3f;
+
+        // Recorded for paint() to draw a lamp beside the label. Tinting the tab was tried
+        // first and read as a second, dimmer version of "selected" -- two states drawn in the
+        // same visual language, distinguishable only by shade. A lamp says something else
+        // entirely, and matches the dots already used beside the lane names.
+        e.button->setLampOn (active);
+    }
 }
 
 void BottomTabs::updateLaneTabLabel()
@@ -105,6 +144,7 @@ void BottomTabs::paint (juce::Graphics& g)
     g.fillRect (tabStrip);
     g.setColour (Palette::bg3.withAlpha (0.6f));
     g.fillRect (juce::Rectangle<float> (0.0f, tabStrip.getBottom() - 1.0f, bounds.getWidth(), 1.0f));
+
 }
 
 void BottomTabs::resized()

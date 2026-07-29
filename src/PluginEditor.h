@@ -31,6 +31,17 @@ private:
 
     stutter::ui::StutterLookAndFeel lookAndFeel;
 
+    /**
+        Holds every panel and is laid out at a fixed size; the editor scales it as a whole.
+
+        Scaling only the row heights -- which is what this used to do -- left every child
+        laid out in fixed pixels inside a box that had changed size. Fonts and controls kept
+        their original dimensions, so enlarging the window just added padding and shrinking it
+        elided captions to "...". Applying an AffineTransform to one container scales the type
+        and the controls along with the boxes, which is what "make the UI bigger" means.
+    */
+    juce::Component content;
+
     stutter::ui::HeaderBar headerBar;
     stutter::ui::SceneBrowser sceneBrowser;
     stutter::ui::PerformanceBar performanceBar;

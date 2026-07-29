@@ -56,20 +56,23 @@ StutterAudioProcessor::StutterAudioProcessor()
             std::array<float, stutter::maxParamsPerLane> defs {};
             std::array<float, stutter::maxParamsPerLane> mins {};
             std::array<float, stutter::maxParamsPerLane> maxes {};
+            std::array<float, stutter::maxParamsPerLane> skews {};
             for (int i = 0; i < set.count && i < stutter::maxParamsPerLane; ++i)
             {
                 defs[(size_t) i]  = set[i].defaultValue;
                 mins[(size_t) i]  = set[i].minValue;
                 maxes[(size_t) i] = set[i].maxValue;
+                skews[(size_t) i] = set[i].skew;
             }
 
             const int n = juce::jmin (set.count, stutter::maxParamsPerLane);
             stutter::SceneSchema::setLaneDefaults (lane, defs.data(), n);
 
-            // The modulation matrix clamps to these. Without them a curve routed to anything
-            // whose range is not 0..1 -- filter cutoff, crush bit depth, repitch semitones --
-            // collapsed to 0..1 and the effect went silent or inert.
-            stutter::SceneSchema::setLaneRanges (lane, mins.data(), maxes.data(), n);
+            // The modulation matrix maps curves onto these. Without them a curve routed to
+            // anything whose range is not 0..1 -- filter cutoff, crush bit depth, repitch
+            // semitones -- collapsed to 0..1 and the effect went silent or inert. The skew
+            // matters too: mapping a skewed range linearly sweeps it at the wrong rate.
+            stutter::SceneSchema::setLaneRanges (lane, mins.data(), maxes.data(), skews.data(), n);
         }
     }
 

@@ -39,7 +39,6 @@ HeaderBar::HeaderBar (StutterAudioProcessor& processor) : proc (processor)
         addAndMakeVisible (*b);
 
     presetNameButton.onClick = [this] { showPresetMenu(); };
-    presetNameButton.addMouseListener (this, false);
     addAndMakeVisible (presetNameButton);
 
     presetSaveButton.onClick = [this] { showSaveDialog(); };
@@ -211,6 +210,60 @@ void HeaderBar::refreshPresetLabel()
     lastShownDirty = pm.isDirty();
 }
 
+namespace
+{
+/**
+    A preset row that can be right-clicked.
+
+    juce::PopupMenu has no notion of a secondary click on an item, so a user preset that wants
+    "left-click loads, right-click offers Delete" has to supply its own component. Everything
+    else about the row -- the tick, the highlight, the text position -- is drawn by the menu's
+    own item renderer so it stays indistinguishable from the factory rows around it.
+*/
+class UserPresetMenuItem : public juce::PopupMenu::CustomComponent
+{
+public:
+    UserPresetMenuItem (juce::String presetName, bool isTicked, bool& rightClickFlag)
+        : name (std::move (presetName)), ticked (isTicked), wasRightClicked (&rightClickFlag)
+    {
+    }
+
+    void getIdealSize (int& idealWidth, int& idealHeight) override
+    {
+        // Ask the look-and-feel for the same metrics a plain item would get, so this row lines
+        // up with its neighbours instead of setting its own height.
+        getLookAndFeel().getIdealPopupMenuItemSize (name, false, -1, idealWidth, idealHeight);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        getLookAndFeel().drawPopupMenuItem (g, getLocalBounds(),
+                                            false,              // isSeparator
+                                            true,               // isActive
+                                            isItemHighlighted(),
+                                            ticked,
+                                            false,              // hasSubMenu
+                                            name, {}, nullptr, nullptr);
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        // Record which button dismissed the menu, then let the normal item-triggered path
+        // carry the row's ID out. The caller reads the flag to decide load vs delete, which
+        // keeps all the routing in one place rather than firing a second menu from in here.
+        if (wasRightClicked != nullptr)
+            *wasRightClicked = e.mods.isPopupMenu();
+
+        triggerMenuItem();
+    }
+
+private:
+    juce::String name;
+    bool ticked;
+    bool* wasRightClicked = nullptr;
+};
+} // namespace
+
 void HeaderBar::showPresetMenu()
 {
     auto& pm = proc.getPresetManager();
@@ -231,15 +284,29 @@ void HeaderBar::showPresetMenu()
             menu.addSectionHeader (currentCategory);
         }
 
-        // User and factory rows behave identically: one click loads, and the current one is
-        // ticked. Putting user presets behind a Load/Delete submenu made the common action
-        // (load) cost an extra step in order to shelter the rare one (delete) -- and it also
-        // hid the tick, so there was no way to see which user preset was loaded.
-        // Delete lives on the right-click menu instead; see mouseDown.
-        menu.addItem (itemId, entry.name, true, i == pm.getCurrentIndex());
+        const bool isCurrent = (i == pm.getCurrentIndex());
+
+        if (entry.isFactory)
+        {
+            menu.addItem (itemId, entry.name, true, isCurrent);
+        }
+        else
+        {
+            // User rows look and load exactly like factory rows, but also accept a right-click
+            // for Delete. A submenu was tried first and cost the common action (load) an extra
+            // step to shelter the rare one -- and it hid the tick, so there was no way to see
+            // which user preset was loaded.
+            auto item = std::make_unique<UserPresetMenuItem> (entry.name, isCurrent,
+                                                              rightClickedInPresetMenu);
+            menu.addCustomItem (itemId, std::move (item), nullptr, entry.name);
+        }
 
         ++itemId;
     }
+
+    // Cleared before every showing; a user row sets it on the way out if the click that
+    // dismissed the menu was a right-click.
+    rightClickedInPresetMenu = false;
 
     // showMenuAsync's callback can likewise fire after this HeaderBar has been destroyed; guard
     // with a SafePointer the same way as the dialogs above.
@@ -250,51 +317,14 @@ void HeaderBar::showPresetMenu()
             if (result <= 0 || safeThis == nullptr)
                 return;
 
-            safeThis->proc.getPresetManager().loadPreset (result - 1);
-        });
-}
-
-void HeaderBar::mouseDown (const juce::MouseEvent& e)
-{
-    // Registered as a listener on the preset button, so this fires for clicks landing on it as
-    // well as on the bar itself. Only the right button is of interest -- the left one is the
-    // button's own onClick.
-    if (e.mods.isPopupMenu() && e.eventComponent == &presetNameButton)
-        showUserPresetContextMenu();
-}
-
-void HeaderBar::showUserPresetContextMenu()
-{
-    auto& pm = proc.getPresetManager();
-    const auto& presets = pm.getPresets();
-
-    juce::PopupMenu menu;
-    int shown = 0;
-
-    for (int i = 0; i < (int) presets.size(); ++i)
-    {
-        if (presets[(size_t) i].isFactory)
-            continue;
-
-        // ID is the preset index + 1; PopupMenu treats 0 as "nothing chosen".
-        menu.addItem (i + 1, "Delete \"" + presets[(size_t) i].name + "\"...");
-        ++shown;
-    }
-
-    if (shown == 0)
-    {
-        menu.addItem (1, "No user presets", false, false);
-        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton));
-        return;
-    }
-
-    juce::Component::SafePointer<HeaderBar> safeThis (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton),
-        [safeThis] (int result)
-        {
-            if (result <= 0 || safeThis == nullptr)
+            if (safeThis->rightClickedInPresetMenu)
+            {
+                safeThis->rightClickedInPresetMenu = false;
+                safeThis->confirmDeleteUserPreset (result - 1);
                 return;
-            safeThis->confirmDeleteUserPreset (result - 1);
+            }
+
+            safeThis->proc.getPresetManager().loadPreset (result - 1);
         });
 }
 

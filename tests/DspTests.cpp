@@ -352,7 +352,8 @@ SceneSnapshot makeModScene (float depth, float speed, bool bipolar, float baseVa
     {
         std::array<float, maxParamsPerLane> lo {}, hi {};
         hi.fill (1.0f);
-        SceneSchema::setLaneRanges (6, lo.data(), hi.data(), maxParamsPerLane);
+        std::array<float, maxParamsPerLane> sk {}; sk.fill (1.0f);
+        SceneSchema::setLaneRanges (6, lo.data(), hi.data(), sk.data(), maxParamsPerLane);
     }
 
     SceneSchema::bakeCurveTable (ramp, s.curves[0].table.data(), CurveSnapshot::tableSize);

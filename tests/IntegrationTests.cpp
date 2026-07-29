@@ -1198,6 +1198,61 @@ TEST_CASE ("Selecting a lane does not alter the sound", "[processor][ui][params]
 }
 
 
+TEST_CASE ("A swept filter stays bounded", "[presets][audio][modulation]")
+{
+    // Routed Modulation sweeps the cutoff with a curve at resonance 0.6. Mapping the curve
+    // linearly onto a range that is actually skewed (20Hz..20kHz at 0.3) ran the sweep through
+    // the top of the spectrum far faster than drawn, and the filter self-oscillated into a
+    // blast of noise -- far louder than the material going in.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    int idx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].name == "Routed Modulation")
+            idx = i;
+    REQUIRE (idx >= 0);
+    pm.loadPreset (idx);
+
+    // Walk every scene in the bank; the report called out scene 1 but all three were suspect.
+    for (int scene = firstSceneIndex; scene <= 3; ++scene)
+    {
+        auto* p = proc.getAPVTS().getParameter (ID::sceneSelect);
+        REQUIRE (p != nullptr);
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) scene));
+
+        const int total = (int) (stutter::test::sampleRate * 2.0);
+        juce::AudioBuffer<float> buf (2, total);
+        stutter::test::fillTestSignal (buf);
+        const float inputPeak = buf.getMagnitude (0, total);
+
+        for (int off = 0; off + stutter::test::blockSize <= total; off += stutter::test::blockSize)
+        {
+            juce::AudioBuffer<float> chunk (buf.getArrayOfWritePointers(), 2, off,
+                                            stutter::test::blockSize);
+            juce::MidiBuffer midi;
+            proc.processBlock (chunk, midi);
+        }
+
+        const float outputPeak = buf.getMagnitude (0, total);
+
+        INFO ("scene " << scene << ": input peak " << inputPeak
+              << ", output peak " << outputPeak);
+
+        // Finite first -- a diverging filter reads as NaN, and every comparison against NaN
+        // is false, so an amplitude check alone would pass silently.
+        CHECK (std::isfinite (outputPeak));
+
+        // A resonant filter legitimately adds gain at the corner, but not tenfold. Anything
+        // beyond that is oscillation, not filtering.
+        CHECK (outputPeak < inputPeak * 10.0f);
+    }
+}
+
+
+
 TEST_CASE ("A freshly loaded preset is not marked dirty", "[presets][ui]")
 {
     StutterAudioProcessor proc;

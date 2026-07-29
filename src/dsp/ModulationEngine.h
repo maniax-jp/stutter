@@ -141,21 +141,48 @@ private:
             // A curve is drawn in 0..1 -- that is what the editor shows and what the breakpoint
             // values mean -- but parameters carry natural units: cutoff in Hz, bit depth in
             // bits, repitch in semitones. Map the curve onto the parameter's own range before
-            // combining, or a swept filter lands at 1Hz and goes silent, which is exactly what
-            // happened while everything was clamped to 0..1 regardless of what it addressed.
+            // combining, or a swept filter lands at 1Hz and goes silent.
             //
-            // Globals genuinely are 0..1, and the fallback range says so.
-            float lo = 0.0f, hi = 1.0f;
+            // The skew has to come along. Filter cutoff spans 20Hz..20kHz skewed at 0.3, so
+            // half-way up a curve is ~1kHz, not the ~10kHz a straight-line reading gives.
+            // Mapping linearly swept the cutoff through the top of the spectrum far faster
+            // than the curve describes, and at high resonance that drove the filter into
+            // self-oscillation -- a blast of noise rather than a sweep.
+            //
+            // Globals genuinely are 0..1 linear, and the fallback says so.
+            float lo = 0.0f, hi = 1.0f, skew = 1.0f;
             if (t < laneParamSlots)
-                SceneSchema::getLaneRange (t / maxParamsPerLane, t % maxParamsPerLane, lo, hi);
+                SceneSchema::getLaneRange (t / maxParamsPerLane, t % maxParamsPerLane, lo, hi, skew);
 
             const float span = hi - lo;
-            const float base = target[(size_t) t];
-            const float modulated = curve.bipolar
-                ? base + (raw - 0.5f) * 2.0f * curve.depth * span
-                : base + (lo + raw * span - base) * curve.depth;
 
-            target[(size_t) t] = juce::jlimit (lo, hi, modulated);
+            // Same shape as juce::NormalisableRange: value = lo + span * norm^(1/skew).
+            auto denormalise = [lo, span, skew] (float norm)
+            {
+                const float clamped = juce::jlimit (0.0f, 1.0f, norm);
+                return lo + span * (juce::approximatelyEqual (skew, 1.0f)
+                                        ? clamped
+                                        : std::pow (clamped, 1.0f / skew));
+            };
+
+            auto normalise = [lo, span, skew] (float value)
+            {
+                if (span <= 0.0f)
+                    return 0.0f;
+                const float norm = juce::jlimit (0.0f, 1.0f, (value - lo) / span);
+                return juce::approximatelyEqual (skew, 1.0f) ? norm : std::pow (norm, skew);
+            };
+
+            const float base = target[(size_t) t];
+
+            // Blend in normalised space so depth means the same fraction of travel everywhere
+            // on a skewed range, then denormalise once.
+            const float baseNorm = normalise (base);
+            const float targetNorm = curve.bipolar
+                ? baseNorm + (raw - 0.5f) * 2.0f * curve.depth
+                : baseNorm + (raw - baseNorm) * curve.depth;
+
+            target[(size_t) t] = juce::jlimit (lo, hi, denormalise (targetNorm));
         }
 
         // On the first evaluation there is nothing to interpolate from, so land directly on

@@ -17,11 +17,15 @@ StutterAudioProcessorEditor::StutterAudioProcessorEditor (StutterAudioProcessor&
 {
     setLookAndFeel (&lookAndFeel);
 
-    addAndMakeVisible (headerBar);
-    addAndMakeVisible (sceneBrowser);
-    addAndMakeVisible (performanceBar);
-    addAndMakeVisible (blockGrid);
-    addAndMakeVisible (bottomTabs);
+    // Everything lives inside `content`, which is always laid out at defaultWidth x
+    // defaultHeight. resized() then scales that one component, so type and controls grow with
+    // the window instead of staying put while the boxes around them change size.
+    addAndMakeVisible (content);
+    content.addAndMakeVisible (headerBar);
+    content.addAndMakeVisible (sceneBrowser);
+    content.addAndMakeVisible (performanceBar);
+    content.addAndMakeVisible (blockGrid);
+    content.addAndMakeVisible (bottomTabs);
 
     blockGrid.onLaneSelected = [this] (int lane) { bottomTabs.setSelectedLane (lane); };
 
@@ -89,16 +93,19 @@ void StutterAudioProcessorEditor::paint (juce::Graphics& g)
 
 void StutterAudioProcessorEditor::resized()
 {
-    auto r = getLocalBounds();
+    // Lay the panels out at the design size, then scale the whole thing to fit. The aspect
+    // ratio is pinned by the constrainer, so one factor covers both axes.
+    content.setBounds (0, 0, defaultWidth, defaultHeight);
 
     const float scale = (float) getWidth() / (float) defaultWidth;
+    content.setTransform (juce::AffineTransform::scale (scale));
 
-    headerBar.setBounds (r.removeFromTop ((int) (72.0f * scale)));
-    sceneBrowser.setBounds (r.removeFromTop ((int) (56.0f * scale)));
-    performanceBar.setBounds (r.removeFromTop ((int) (30.0f * scale)));
+    auto r = content.getLocalBounds();
 
-    auto bottomHeight = (int) (220.0f * scale);
-    bottomTabs.setBounds (r.removeFromBottom (bottomHeight));
+    headerBar.setBounds (r.removeFromTop (72));
+    sceneBrowser.setBounds (r.removeFromTop (56));
+    performanceBar.setBounds (r.removeFromTop (30));
+    bottomTabs.setBounds (r.removeFromBottom (220));
 
     blockGrid.setBounds (r);
 }

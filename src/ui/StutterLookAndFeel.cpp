@@ -213,14 +213,23 @@ void StutterLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton
     }
 }
 
-void StutterLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& button, const juce::Colour&,
+void StutterLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& button,
+                                                const juce::Colour& backgroundColour,
                                                 bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown)
 {
     auto bounds = button.getLocalBounds().toFloat().reduced (1.0f);
     const float corner = juce::jmin (6.0f, bounds.getHeight() * 0.3f);
 
     const bool on = button.getToggleState();
-    juce::Colour base = on ? Palette::accentDim : Palette::bg2;
+
+    // Honour an explicitly set buttonColourId. Ignoring it meant setColour on a button did
+    // nothing at all, so a caller that wanted to tint one -- the curve tabs, to show that
+    // VOLUME or PAN is shaping the sound even while its panel is closed -- had no way to.
+    // Untinted buttons are transparent-black, which is the JUCE default and reads as "no
+    // opinion", so fall back to the palette then.
+    const bool tinted = ! backgroundColour.isTransparent();
+    juce::Colour base = tinted ? backgroundColour
+                               : (on ? Palette::accentDim : Palette::bg2);
 
     if (shouldDrawButtonAsDown)
         base = base.darker (0.15f);
