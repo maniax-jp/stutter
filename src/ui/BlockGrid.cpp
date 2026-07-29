@@ -112,7 +112,8 @@ BlockGrid::HitInfo BlockGrid::hitTestGrid (juce::Point<int> p) const
 
     // Resolve which block, if any, sits under the cursor, and whether the pointer is close
     // enough to an edge that the user means to resize rather than move.
-    auto scene = doc.ensureScene (sceneIndex);
+    // Read-only: hit-testing must not create the scene it is testing against.
+    auto scene = doc.findScene (sceneIndex);
     auto blocks = scene.getChildWithName (SceneIDs::blocksNode);
     if (blocks.isValid())
     {

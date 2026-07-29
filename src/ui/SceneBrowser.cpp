@@ -40,9 +40,10 @@ int SceneBrowser::sceneAtPoint (juce::Point<int> p) const
 bool SceneBrowser::sceneHasContent (int sceneIndex) const
 {
     // Read the document rather than the baked bank: an empty scene the user has just started
-    // editing should light up immediately, without waiting for a publish.
-    auto& mutableDoc = const_cast<SceneDocument&> (doc);
-    auto scene = mutableDoc.ensureScene (sceneIndex);
+    // editing should light up immediately, without waiting for a publish. findScene rather
+    // than ensureScene because this runs from paint() -- creating a node per cell per frame
+    // would fill the document with empty scenes just by looking at it.
+    auto scene = doc.findScene (sceneIndex);
     if (! scene.isValid())
         return false;
 

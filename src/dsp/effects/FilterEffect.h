@@ -75,7 +75,11 @@ public:
         // Type and LFO rate stay latched; both define structure that must not shift mid-block.
         if (ctx.modulatedParams != nullptr)
         {
-            cutoffHz  = ctx.modulatedParams[1];
+            // Clamped to the declared range rather than taken on trust: a modulated value
+            // arrives from a curve, and a curve whose target range is unknown (or a scene
+            // deserialised from a future build) could otherwise drive the cutoff to zero,
+            // where the coefficient below collapses and the filter state goes non-finite.
+            cutoffHz  = juce::jlimit (20.0f, 20000.0f, ctx.modulatedParams[1]);
             resonance = juce::jlimit (0.0f, 0.99f, ctx.modulatedParams[2]);
             lfoDepth  = juce::jlimit (0.0f, 1.0f, ctx.modulatedParams[4]);
         }
@@ -104,6 +108,20 @@ public:
             s.low += f * s.band;
             const float high = input - s.low - q * s.band;
             s.band += f * high;
+
+            // This SVF topology is only conditionally stable, and the cutoff is now genuinely
+            // modulated -- a curve can sweep it decades within a bar. A fast sweep at high
+            // resonance can push the state past what the coefficient assumes and diverge, and
+            // once it is non-finite it stays that way for the rest of the session. Bounding
+            // the state costs two compares per sample and makes divergence self-correcting.
+            constexpr float stateLimit = 64.0f;
+            if (! (std::abs (s.low) < stateLimit) || ! (std::abs (s.band) < stateLimit))
+            {
+                s.low = 0.0f;
+                s.band = 0.0f;
+                channelSamples[c] = input;
+                continue;
+            }
 
             float out;
             switch (filterType)

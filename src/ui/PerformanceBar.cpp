@@ -147,7 +147,8 @@ void PerformanceBar::refresh()
 {
     const juce::ScopedValueSetter<bool> guard (updatingFromModel, true);
 
-    auto scene = doc.ensureScene (sceneIndex);
+    // Read-only: pulling values back from the model must not create the node.
+    auto scene = doc.findScene (sceneIndex);
 
     beatsBox.setSelectedId (juce::jlimit (1, 8, doc.getBeats (sceneIndex)),
                             juce::dontSendNotification);

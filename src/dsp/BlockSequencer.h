@@ -94,6 +94,42 @@ public:
     float getPlayheadPhase() const noexcept { return playheadPhase.load (std::memory_order_relaxed); }
 
     /**
+        Advance only the playhead readout, for blocks where there is no scene to render.
+
+        The playhead is derived from the transport, not from any scene's content, so an empty
+        or missing scene is still a position in the bar. Skipping this left the marker frozen
+        wherever the last real scene stopped -- which looked like the plugin had hung, and
+        cleared as soon as anything caused a scene to exist again.
+    */
+    void advancePlayheadOnly (double ppqAtBlockStart, double ppqPerSample, int numSamples,
+                              int beats, int divisions) noexcept
+    {
+        if (! sequencerEnabled)
+        {
+            playheadDivision.store (-1, std::memory_order_relaxed);
+            return;
+        }
+
+        const int totalDivs = juce::jmax (1, beats * divisions);
+        const double ppqPerDivision = (double) beats / (double) totalDivs;
+        const double patternLengthPpq = (double) beats;
+        if (ppqPerDivision <= 0.0 || patternLengthPpq <= 0.0)
+            return;
+
+        const double ppqAtEnd = ppqAtBlockStart + ppqPerSample * (double) numSamples;
+        double patternPos = std::fmod (ppqAtEnd, patternLengthPpq);
+        if (patternPos < 0.0)
+            patternPos += patternLengthPpq;
+
+        constexpr double divisionEpsilon = 1.0e-9;
+        const double divPos = patternPos / ppqPerDivision;
+        const int divIndex = juce::jlimit (0, totalDivs - 1, (int) (divPos + divisionEpsilon));
+
+        playheadDivision.store (divIndex, std::memory_order_relaxed);
+        playheadPhase.store ((float) (patternPos / patternLengthPpq), std::memory_order_relaxed);
+    }
+
+    /**
         Process one block against a scene snapshot.
 
         `scene` must outlive the call; the caller (the processor) holds it via SceneStore for

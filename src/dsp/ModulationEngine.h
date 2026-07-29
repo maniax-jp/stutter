@@ -138,12 +138,24 @@ private:
             const float phase = (float) (scaled - std::floor (scaled));
             const float raw = curve.valueAtPhase (phase);
 
+            // A curve is drawn in 0..1 -- that is what the editor shows and what the breakpoint
+            // values mean -- but parameters carry natural units: cutoff in Hz, bit depth in
+            // bits, repitch in semitones. Map the curve onto the parameter's own range before
+            // combining, or a swept filter lands at 1Hz and goes silent, which is exactly what
+            // happened while everything was clamped to 0..1 regardless of what it addressed.
+            //
+            // Globals genuinely are 0..1, and the fallback range says so.
+            float lo = 0.0f, hi = 1.0f;
+            if (t < laneParamSlots)
+                SceneSchema::getLaneRange (t / maxParamsPerLane, t % maxParamsPerLane, lo, hi);
+
+            const float span = hi - lo;
             const float base = target[(size_t) t];
             const float modulated = curve.bipolar
-                ? base + (raw - 0.5f) * 2.0f * curve.depth
-                : base + (raw - base) * curve.depth;
+                ? base + (raw - 0.5f) * 2.0f * curve.depth * span
+                : base + (lo + raw * span - base) * curve.depth;
 
-            target[(size_t) t] = juce::jlimit (0.0f, 1.0f, modulated);
+            target[(size_t) t] = juce::jlimit (lo, hi, modulated);
         }
 
         // On the first evaluation there is nothing to interpolate from, so land directly on

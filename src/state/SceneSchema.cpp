@@ -14,6 +14,12 @@ namespace stutter
 static std::array<std::array<float, maxParamsPerLane>, maxLanes> g_laneDefaults {};
 static std::array<bool, maxLanes> g_laneDefaultsSet {};
 
+/** Registered per-lane parameter ranges; see SceneSchema::setLaneRanges. Same lifetime and
+    threading story as the defaults above: written once at startup, read-only afterwards. */
+static std::array<std::array<float, maxParamsPerLane>, maxLanes> g_laneMin {};
+static std::array<std::array<float, maxParamsPerLane>, maxLanes> g_laneMax {};
+static std::array<bool, maxLanes> g_laneRangesSet {};
+
 static float smoothstepFn (float t) noexcept
 {
     return t * t * (3.0f - 2.0f * t);
@@ -338,10 +344,49 @@ void SceneSchema::setLaneDefaults (int lane, const float* values, int count)
     g_laneDefaultsSet[static_cast<size_t> (lane)] = true;
 }
 
+void SceneSchema::setLaneRanges (int lane, const float* minValues, const float* maxValues, int count)
+{
+    if (lane < 0 || lane >= maxLanes || minValues == nullptr || maxValues == nullptr)
+        return;
+
+    auto& lo = g_laneMin[static_cast<size_t> (lane)];
+    auto& hi = g_laneMax[static_cast<size_t> (lane)];
+    lo.fill (0.0f);
+    hi.fill (1.0f);
+
+    for (int i = 0; i < count && i < maxParamsPerLane; ++i)
+    {
+        lo[static_cast<size_t> (i)] = minValues[i];
+        hi[static_cast<size_t> (i)] = maxValues[i];
+    }
+
+    g_laneRangesSet[static_cast<size_t> (lane)] = true;
+}
+
+void SceneSchema::getLaneRange (int lane, int paramIndex, float& minOut, float& maxOut)
+{
+    // 0..1 is the safe fallback: it is what the old unconditional clamp used, so a lane whose
+    // ranges were never registered behaves exactly as before rather than unclamped.
+    minOut = 0.0f;
+    maxOut = 1.0f;
+
+    if (lane < 0 || lane >= maxLanes || paramIndex < 0 || paramIndex >= maxParamsPerLane)
+        return;
+    if (! g_laneRangesSet[static_cast<size_t> (lane)])
+        return;
+
+    minOut = g_laneMin[static_cast<size_t> (lane)][static_cast<size_t> (paramIndex)];
+    maxOut = g_laneMax[static_cast<size_t> (lane)][static_cast<size_t> (paramIndex)];
+}
+
 void SceneSchema::clearLaneDefaults()
 {
     for (auto& d : g_laneDefaults) d.fill (0.0f);
     g_laneDefaultsSet.fill (false);
+
+    for (auto& d : g_laneMin) d.fill (0.0f);
+    for (auto& d : g_laneMax) d.fill (1.0f);
+    g_laneRangesSet.fill (false);
 }
 
 SceneSnapshot SceneSchema::sceneFromTree (const juce::ValueTree& sceneTree)

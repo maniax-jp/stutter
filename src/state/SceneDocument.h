@@ -55,8 +55,18 @@ public:
         store.rebuildFromTree (state);
     }
 
-    /** The <Scene> node for `index`, creating it if absent. */
-    juce::ValueTree ensureScene (int index)
+    /**
+        The <Scene> node for `index`, or an invalid tree when that slot has never been used.
+
+        Use this from anything that only reads -- painting, hit-testing, populating a panel.
+        ensureScene() below *creates* the node as a side effect, so calling it from a paint()
+        materialises every slot the component happens to draw: the browser paints 24 cells at
+        30Hz, which used to conjure 24 empty scenes the moment a preset loaded. Those scenes
+        then counted as real, which made the mirror write a full set of default lane values
+        into APVTS (marking a freshly loaded preset as edited) and made the sequencer treat an
+        empty slot as playable.
+    */
+    juce::ValueTree findScene (int index) const
     {
         if (index < 0 || index >= maxScenes)
             return {};
@@ -68,6 +78,19 @@ public:
                 && (int) child.getProperty (SceneIDs::index, -1) == index)
                 return child;
         }
+
+        return {};
+    }
+
+    /** The <Scene> node for `index`, creating it if absent. Callers that only read should use
+        findScene() -- see the warning there. */
+    juce::ValueTree ensureScene (int index)
+    {
+        if (index < 0 || index >= maxScenes)
+            return {};
+
+        if (auto existing = findScene (index); existing.isValid())
+            return existing;
 
         juce::ValueTree scene (SceneIDs::scene);
         scene.setProperty (SceneIDs::index, index, nullptr);

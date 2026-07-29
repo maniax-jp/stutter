@@ -3,6 +3,7 @@
 
 #include "TestHelpers.h"
 #include <thread>
+#include <set>
 #include "PresetManager.h"
 #include "FactoryScenes.h"
 #include "ui/SceneBrowser.h"
@@ -1059,6 +1060,141 @@ TEST_CASE ("Presets carry a sound, not a position in the arrangement", "[presets
 
         CHECK (restored.getSceneSelector().getActiveScene() == 4);
     }
+}
+
+
+TEST_CASE ("Reading the document never creates scenes", "[document][presets]")
+{
+    // ensureScene is a mutator wearing a getter's name, and the browser called it from paint()
+    // -- 24 cells at 30Hz, so a preset load conjured 24 empty scenes just by being looked at.
+    // Those counted as real everywhere after: the mirror wrote a full set of default lane
+    // values into APVTS (marking the preset edited), and the sequencer treated an empty slot
+    // as something to play.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    auto& doc = proc.getSceneDocument();
+
+    const int before = doc.getState().getNumChildren();
+
+    // Sweep the range the browser paints. findScene must report absence without creating it.
+    for (int i = firstSceneIndex; i <= 24; ++i)
+        (void) doc.findScene (i);
+
+    INFO ("scene nodes before " << before << ", after sweeping 24 slots "
+          << doc.getState().getNumChildren());
+    CHECK (doc.getState().getNumChildren() == before);
+
+    // The editor's read-only paths must all be on findScene. Anything still calling
+    // ensureScene from a paint or a hit-test puts the bug straight back.
+    CHECK_FALSE (doc.findScene (7).isValid());
+
+    // ensureScene still creates, for the paths that genuinely need it.
+    doc.ensureScene (7);
+    CHECK (doc.findScene (7).isValid());
+    CHECK (doc.getState().getNumChildren() == before + 1);
+
+    SECTION ("painting the editor does not add scenes either")
+    {
+        // The contract above is only useful if the editor actually honours it. Render a real
+        // editor into an image: that drives paint() on the browser and the grid, which is
+        // exactly where the accidental creation used to happen.
+        std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditorIfNeeded());
+        REQUIRE (editor != nullptr);
+        editor->setSize (1200, 800);
+
+        const int beforePaint = doc.getState().getNumChildren();
+
+        juce::Image img (juce::Image::ARGB, editor->getWidth(), editor->getHeight(), true);
+        for (int frame = 0; frame < 3; ++frame)
+        {
+            juce::Graphics g (img);
+            editor->paintEntireComponent (g, true);
+        }
+
+        INFO ("scene nodes before painting " << beforePaint
+              << ", after three frames " << doc.getState().getNumChildren());
+        CHECK (doc.getState().getNumChildren() == beforePaint);
+
+        proc.editorBeingDeleted (editor.get());
+    }
+}
+
+TEST_CASE ("The playhead keeps moving when there is no scene to render", "[processor][ui]")
+{
+    // The playhead comes from the transport, not from any scene's contents, so an empty or
+    // missing scene is still a position in the bar. It used to freeze wherever the last real
+    // scene left it, which read as the plugin having hung -- and cleared as soon as anything
+    // caused a scene to exist again, which is why clicking a lane header "fixed" it.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    proc.getAPVTS().getParameter (ID::hostSync)->setValueNotifyingHost (0.0f);
+    setInternalBpm (proc, bpm);
+
+    // Point at a slot with nothing in it.
+    auto* p = proc.getAPVTS().getParameter (ID::sceneSelect);
+    REQUIRE (p != nullptr);
+    p->setValueNotifyingHost (p->convertTo0to1 (40.0f));
+
+    juce::AudioBuffer<float> block (2, stutter::test::blockSize);
+    std::set<int> seen;
+    for (int i = 0; i < 200; ++i)
+    {
+        block.clear();
+        juce::MidiBuffer midi;
+        proc.processBlock (block, midi);
+        seen.insert (proc.getBlockPlayheadDivision());
+    }
+
+    INFO ("distinct playhead divisions seen: " << seen.size());
+    CHECK (seen.size() > 1);
+}
+
+TEST_CASE ("Selecting a lane does not alter the sound", "[processor][ui][params]")
+{
+    // Attaching a slider makes JUCE push the parameter's value back out through it, and the
+    // value can return subtly different once the control's step size has rounded it. That
+    // read as a user edit and was saved into the scene, so clicking a lane header audibly
+    // changed the sound -- worst on filter cutoff, whose range is skewed and 1Hz-stepped.
+    StutterAudioProcessor proc;
+    proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    const int scene = proc.getSceneSelector().getActiveScene();
+    doc.addBlock (scene, StutterAudioProcessor::laneFilter, 0, 16);
+    doc.publish();
+
+    const auto cutoffId = ID::lanePrefix (StutterAudioProcessor::laneFilter) + ID::filterCutoff;
+    auto* cutoff = proc.getAPVTS().getParameter (cutoffId);
+    REQUIRE (cutoff != nullptr);
+
+    const auto& range = proc.getAPVTS().getParameterRange (cutoffId);
+    cutoff->beginChangeGesture();
+    cutoff->setValueNotifyingHost (range.convertTo0to1 (800.0f));
+    cutoff->endChangeGesture();
+    proc.pumpSceneMirror();
+
+    const auto* before = proc.getSceneStore().get (scene);
+    REQUIRE (before != nullptr);
+    const float stored = before->lanes[(size_t) StutterAudioProcessor::laneFilter].params[1];
+
+    // Now do what selecting a lane does: write the parameter back through a control while
+    // write-back is suppressed. The scene must not move.
+    {
+        const StutterAudioProcessor::ScopedWritebackSuppressor guard (proc);
+        cutoff->beginChangeGesture();
+        cutoff->setValueNotifyingHost (range.convertTo0to1 (799.6f));
+        cutoff->endChangeGesture();
+    }
+    proc.pumpSceneMirror();
+
+    const auto* after = proc.getSceneStore().get (scene);
+    REQUIRE (after != nullptr);
+    INFO ("scene cutoff before " << stored
+          << ", after a suppressed write " << after->lanes[(size_t) StutterAudioProcessor::laneFilter].params[1]);
+    CHECK_THAT (after->lanes[(size_t) StutterAudioProcessor::laneFilter].params[1],
+                WithinAbs (stored, 1.0e-3f));
 }
 
 

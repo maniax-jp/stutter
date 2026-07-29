@@ -146,6 +146,40 @@ public:
         on message-loop scheduling. */
     void pumpSceneMirror() { flushPendingLaneParamWrites(); mirrorActiveSceneToApvts(); }
 
+    /**
+        Suppresses lane-parameter write-back for as long as it is alive.
+
+        For UI code that attaches sliders and combo boxes to parameters: JUCE pushes the
+        current value back out through the control as part of attaching it, and a combo box
+        wraps that in a change gesture. Without this, rebuilding a panel -- which is all that
+        selecting a lane does -- reads as a user edit and re-saves the value through the
+        control's own quantisation, audibly changing the sound.
+
+        Message thread only, and must not outlive the processor.
+    */
+    class ScopedWritebackSuppressor
+    {
+    public:
+        explicit ScopedWritebackSuppressor (StutterAudioProcessor& p)
+            : owner (p), previous (p.suppressParamWriteback)
+        {
+            owner.suppressParamWriteback = true;
+        }
+
+        ~ScopedWritebackSuppressor() { owner.suppressParamWriteback = previous; }
+
+    private:
+        StutterAudioProcessor& owner;
+        bool previous;
+
+        JUCE_DECLARE_NON_COPYABLE (ScopedWritebackSuppressor)
+    };
+
+    /** True while parameter writes are the plugin's own bookkeeping rather than a user edit --
+        a mirror refill, or a UI panel attaching its controls. Anything that decides "has this
+        patch been modified?" has to skip those, or simply loading a preset marks it dirty. */
+    bool isWritingParametersInternally() const noexcept { return suppressParamWriteback; }
+
     /** Current division for the block grid's playhead, or -1 when idle. */
     int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
 
@@ -200,7 +234,7 @@ private:
 
         void parameterValueChanged (int, float newNormalisedValue) override
         {
-            if (! inGesture.load (std::memory_order_acquire))
+            if (! inGesture.load (std::memory_order_acquire) || owner.suppressParamWriteback)
                 return;
 
             // Denormalise here so the timer does not have to reach back into the parameter
@@ -213,6 +247,15 @@ private:
         void parameterGestureChanged (int, bool gestureIsStarting) override
         {
             inGesture.store (gestureIsStarting, std::memory_order_release);
+
+            // suppressParamWriteback has to be honoured *here*, not only where the flush
+            // reads it. Attaching a slider or combo box makes JUCE push the parameter's value
+            // back through it, and a combo box wraps that in a gesture -- so merely selecting
+            // a lane, which rebuilds the panel, used to record a write and re-save the value
+            // through the slider's own quantisation. That is why clicking a lane header could
+            // change the sound.
+            if (owner.suppressParamWriteback)
+                return;
 
             // Catch the final value on release. A drag's last move can arrive before the
             // end-gesture, but a click that jumps straight to a value emits no move at all --

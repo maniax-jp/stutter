@@ -166,7 +166,20 @@ namespace SceneSchema
     */
     void setLaneDefaults (int lane, const float* values, int count);
 
-    /** Clear all registered defaults. Tests use this to isolate. */
+    /**
+        Register a lane's parameter ranges, alongside its defaults.
+
+        The modulation matrix needs these to clamp a modulated value: parameters are in natural
+        units, so 0..1 is the exception rather than the rule -- filter cutoff runs to 20kHz and
+        repitch goes negative. Clamping everything to 0..1 silently collapsed those the moment
+        a curve was routed to them, which is what made a swept filter go silent.
+    */
+    void setLaneRanges (int lane, const float* minValues, const float* maxValues, int count);
+
+    /** A parameter's registered range, or {0, 1} when nothing was registered. */
+    void getLaneRange (int lane, int paramIndex, float& minOut, float& maxOut);
+
+    /** Clear all registered defaults and ranges. Tests use this to isolate. */
     void clearLaneDefaults();
 
     /** Build a baked snapshot from one <Scene> node. Missing or malformed properties fall

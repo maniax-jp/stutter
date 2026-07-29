@@ -344,6 +344,17 @@ SceneSnapshot makeModScene (float depth, float speed, bool bipolar, float baseVa
         { 0.0f, 0.0f, 0.0f, PointWeight::Hard },
         { 1.0f, 1.0f, 0.0f, PointWeight::Hard }
     };
+    // These cases reason in plain 0..1, so declare that range for the slot they use. The
+    // registry is process-global and a processor-level test may already have registered the
+    // real filter range (20Hz..20kHz) for this slot -- without pinning it here, the curve
+    // would be mapped onto Hz and every expectation below would be off by orders of
+    // magnitude. Registering rather than clearing keeps other suites unaffected.
+    {
+        std::array<float, maxParamsPerLane> lo {}, hi {};
+        hi.fill (1.0f);
+        SceneSchema::setLaneRanges (6, lo.data(), hi.data(), maxParamsPerLane);
+    }
+
     SceneSchema::bakeCurveTable (ramp, s.curves[0].table.data(), CurveSnapshot::tableSize);
     s.curves[0].targetParam = (juce::int16) paramIndex (6, 1);
     s.curves[0].depth = depth;

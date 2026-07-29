@@ -329,7 +329,7 @@ PresetManager::PresetManager (StutterAudioProcessor& processor) : proc (processo
 
 void PresetManager::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier&)
 {
-    if (applyingPreset)
+    if (applyingPreset || proc.isWritingParametersInternally())
         return;
 
     // The performance parameters are not part of a preset, so moving them cannot make one
@@ -343,13 +343,13 @@ void PresetManager::valueTreePropertyChanged (juce::ValueTree& tree, const juce:
 
 void PresetManager::valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&)
 {
-    if (! applyingPreset)
+    if (! applyingPreset && ! proc.isWritingParametersInternally())
         dirty = true;
 }
 
 void PresetManager::valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree&, int)
 {
-    if (! applyingPreset)
+    if (! applyingPreset && ! proc.isWritingParametersInternally())
         dirty = true;
 }
 

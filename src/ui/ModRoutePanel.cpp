@@ -78,7 +78,8 @@ void ModRoutePanel::rebuildRows()
 {
     rows.clear();
 
-    auto scene = doc.ensureScene (sceneIndex);
+    // Read-only: rebuilding the row list must not materialise an empty scene.
+    auto scene = doc.findScene (sceneIndex);
     if (! scene.isValid())
         return;
 

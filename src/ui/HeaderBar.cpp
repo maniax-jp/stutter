@@ -118,9 +118,11 @@ HeaderBar::~HeaderBar() { stopTimer(); }
 void HeaderBar::refreshKnobCaptions()
 {
     // isMouseOver(true) includes the knob's children, so the whole control counts as hovered
-    // rather than just the pixels the rotary happens to paint.
-    const bool overDryWet = dryWetKnob.isMouseOver (true);
-    const bool overOutput = outputKnob.isMouseOver (true);
+    // rather than just the pixels the rotary happens to paint. isMouseButtonDown covers the
+    // rest of a drag: the pointer leaves the knob's bounds almost immediately once you start
+    // moving, and losing the readout mid-drag is exactly when it is being read.
+    const bool overDryWet = dryWetKnob.isMouseOver (true) || dryWetKnob.isMouseButtonDown (true);
+    const bool overOutput = outputKnob.isMouseOver (true) || outputKnob.isMouseButtonDown (true);
 
     // Percent for a 0..1 mix, dB for a gain: the unit a user would say out loud.
     dryWetLabel.setText (overDryWet

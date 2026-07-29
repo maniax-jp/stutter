@@ -88,6 +88,12 @@ void LaneParamPanel::addChoice (const juce::String& paramId, const juce::String&
 
 void LaneParamPanel::rebuildForLane (int laneIndex)
 {
+    // Attaching a slider or combo box makes JUCE write the parameter's value back out through
+    // it, and the value can come back subtly different once the control's own step size has
+    // rounded it. Left unguarded, that reads as a user edit and gets saved into the scene --
+    // so merely clicking a lane header changed the sound.
+    const StutterAudioProcessor::ScopedWritebackSuppressor guard (proc);
+
     currentLane = laneIndex;
     controls.clear();
 

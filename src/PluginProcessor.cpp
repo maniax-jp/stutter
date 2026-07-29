@@ -54,10 +54,22 @@ StutterAudioProcessor::StutterAudioProcessor()
         {
             const auto set = effect->getParamDescriptors();
             std::array<float, stutter::maxParamsPerLane> defs {};
+            std::array<float, stutter::maxParamsPerLane> mins {};
+            std::array<float, stutter::maxParamsPerLane> maxes {};
             for (int i = 0; i < set.count && i < stutter::maxParamsPerLane; ++i)
-                defs[(size_t) i] = set[i].defaultValue;
-            stutter::SceneSchema::setLaneDefaults (lane, defs.data(),
-                                                  juce::jmin (set.count, stutter::maxParamsPerLane));
+            {
+                defs[(size_t) i]  = set[i].defaultValue;
+                mins[(size_t) i]  = set[i].minValue;
+                maxes[(size_t) i] = set[i].maxValue;
+            }
+
+            const int n = juce::jmin (set.count, stutter::maxParamsPerLane);
+            stutter::SceneSchema::setLaneDefaults (lane, defs.data(), n);
+
+            // The modulation matrix clamps to these. Without them a curve routed to anything
+            // whose range is not 0..1 -- filter cutoff, crush bit depth, repitch semitones --
+            // collapsed to 0..1 and the effect went silent or inert.
+            stutter::SceneSchema::setLaneRanges (lane, mins.data(), maxes.data(), n);
         }
     }
 
@@ -230,22 +242,30 @@ void StutterAudioProcessor::updateTransportAndSequence (juce::AudioBuffer<float>
     //
     // A null scene (nothing published, or an index with no data) leaves the buffer untouched
     // rather than silencing it -- an unmapped note should be inert, not a dropout.
-    if (const auto* scene = sceneStore.get (sceneSelector.getActiveScene()))
-    {
-        if (scene->populated)
-        {
-            // Chain order can change with the scene, and sorting per sample would be waste;
-            // doing it here costs one pass per block.
-            if (lastChainOrderScene != sceneSelector.getActiveScene())
-            {
-                blockSequencer.updateChainOrder (*scene);
-                lastChainOrderScene = sceneSelector.getActiveScene();
-            }
+    const auto* scene = sceneStore.get (sceneSelector.getActiveScene());
 
-            blockSequencer.processBlock (buffer, captureBuffer, *scene,
-                                         ppqAtBlockStart, ppqPerSample,
-                                         &modulationEngine);
+    if (scene != nullptr && scene->populated)
+    {
+        // Chain order can change with the scene, and sorting per sample would be waste;
+        // doing it here costs one pass per block.
+        if (lastChainOrderScene != sceneSelector.getActiveScene())
+        {
+            blockSequencer.updateChainOrder (*scene);
+            lastChainOrderScene = sceneSelector.getActiveScene();
         }
+
+        blockSequencer.processBlock (buffer, captureBuffer, *scene,
+                                     ppqAtBlockStart, ppqPerSample,
+                                     &modulationEngine);
+    }
+    else
+    {
+        // No scene to render, but the transport is still running: keep the playhead moving so
+        // the grid shows where in the bar we are. Without this it froze at whatever division
+        // the last real scene left it on, which reads as the plugin having stopped.
+        blockSequencer.advancePlayheadOnly (ppqAtBlockStart, ppqPerSample, buffer.getNumSamples(),
+                                            scene != nullptr ? scene->beats : 4,
+                                            scene != nullptr ? scene->divisions : 4);
     }
 
     // Advance internal free-running clock for next block regardless (so it stays live when host stops)
