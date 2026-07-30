@@ -2202,3 +2202,87 @@ TEST_CASE ("The browser notices content added elsewhere", "[ui][scene]")
     proc.storeShaperCurvesToCurrentScene();
     CHECK (browser.sceneHasContent (curveOnly));
 }
+
+
+TEST_CASE ("Republishing the bank mid-playback does not re-trigger a lane", "[processor][sequencer][audio]")
+{
+    // The editor republishes the whole bank on any mouse-up in the grid -- including one that
+    // only selected a lane. The sequencer tracked the block a lane was playing by POINTER into
+    // that bank, so a republish handed it a new allocation holding identical data and the
+    // comparison reported "different block". The effect re-latched: fresh anchor, restarted
+    // envelope, mid-note. Audible as a change in attack and brightness, which is exactly what
+    // clicking a lane header during playback sounded like.
+    //
+    // Rendering the same music with and without the republish must give the same samples.
+    auto render = [] (bool republishMidway)
+    {
+        StutterAudioProcessor proc;
+        proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        stutter::PresetManager pm (proc);
+
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == "Acid Wobble")
+                idx = i;
+        REQUIRE (idx >= 0);
+
+        constexpr int totalBlocks = 240;
+        constexpr int loadAt = 60;
+        constexpr int republishAt = 140;
+
+        juce::AudioBuffer<float> out (2, stutter::test::blockSize * totalBlocks);
+        out.clear();
+
+        for (int b = 0; b < totalBlocks; ++b)
+        {
+            if (b == loadAt)
+            {
+                pm.loadPreset (idx);
+                proc.pumpSceneMirror();
+            }
+
+            // Exactly what a lane-header click does to the document: nothing but a republish.
+            if (b == republishAt && republishMidway)
+            {
+                proc.getSceneDocument().publish();
+                proc.pumpSceneMirror();
+            }
+
+            juce::AudioBuffer<float> blk (2, stutter::test::blockSize);
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < stutter::test::blockSize; ++i)
+                {
+                    const double t = (double) (b * stutter::test::blockSize + i)
+                                       / stutter::test::sampleRate;
+                    // Harmonically rich: a re-latch shows up in the high partials long before
+                    // it shows up in level, and the report was about brightness and attack.
+                    double v = 0.0;
+                    for (int h = 1; h <= 12; ++h)
+                        v += std::sin (2.0 * juce::MathConstants<double>::pi * 110.0 * h * t) / h;
+                    blk.setSample (c, i, (float) (0.25 * v));
+                }
+
+            juce::MidiBuffer midi;
+            proc.processBlock (blk, midi);
+            for (int c = 0; c < 2; ++c)
+                out.copyFrom (c, b * stutter::test::blockSize, blk, c, 0, stutter::test::blockSize);
+        }
+        return out;
+    };
+
+    const auto undisturbed = render (false);
+    const auto republished = render (true);
+
+    // Compare the tail, well past the republish, so a transient would have settled and only a
+    // genuine divergence survives.
+    const int from = stutter::test::blockSize * 160;
+    double maxDiff = 0.0;
+    for (int c = 0; c < 2; ++c)
+        for (int i = from; i < undisturbed.getNumSamples(); ++i)
+            maxDiff = juce::jmax (maxDiff, std::abs ((double) undisturbed.getSample (c, i)
+                                                     - (double) republished.getSample (c, i)));
+
+    INFO ("tail maxDiff after a mid-playback republish: " << maxDiff);
+    CHECK (maxDiff < 1.0e-6);
+}

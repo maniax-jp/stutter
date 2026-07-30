@@ -337,7 +337,42 @@ private:
     {
         bool active = false;
         int currentDivision = -1;
-        const Block* currentBlock = nullptr;
+
+        /**
+            The block this lane is currently playing.
+
+            Held by value rather than as a pointer into the bank. The bank is republished as a
+            whole new allocation on every edit -- and the editor publishes on any mouse-up in
+            the grid, including one that only selected a lane -- so a pointer comparison
+            reports "different block" for a block whose data did not change at all. That
+            re-latched the effect: a fresh anchor and a restarted envelope, mid-note, which is
+            audible as a change in attack and brightness. Comparing what a block IS rather than
+            where it happens to live makes a republish inaudible, which is what it should be.
+
+            `valid` distinguishes "no block" from a default-constructed one at division 0.
+        */
+        struct BlockRef
+        {
+            bool valid = false;
+            int16_t startDiv = 0;
+            int16_t lengthDiv = 0;
+
+            int16_t endDiv() const noexcept { return (int16_t) (startDiv + lengthDiv); }
+
+            bool isSameBlockAs (const Block* b) const noexcept
+            {
+                return valid && b != nullptr && b->startDiv == startDiv && b->lengthDiv == lengthDiv;
+            }
+
+            void set (const Block* b) noexcept
+            {
+                valid = b != nullptr;
+                startDiv = valid ? b->startDiv : (int16_t) 0;
+                lengthDiv = valid ? b->lengthDiv : (int16_t) 0;
+            }
+        };
+
+        BlockRef currentBlock;
         float gain = 0.0f;
         int fadeDirection = 0;   // +1 in, -1 out, 0 steady
     };
@@ -438,11 +473,11 @@ private:
         four divisions sees a single ramp, which is the point of variable-length blocks. */
     static double blockProgress (const LaneRuntimeState& st, int divIndex, double divPhase) noexcept
     {
-        if (st.currentBlock == nullptr || st.currentBlock->lengthDiv <= 0)
+        if (! st.currentBlock.valid || st.currentBlock.lengthDiv <= 0)
             return divPhase;
 
-        const double elapsed = (double) (divIndex - st.currentBlock->startDiv) + divPhase;
-        return juce::jlimit (0.0, 1.0, elapsed / (double) st.currentBlock->lengthDiv);
+        const double elapsed = (double) (divIndex - st.currentBlock.startDiv) + divPhase;
+        return juce::jlimit (0.0, 1.0, elapsed / (double) st.currentBlock.lengthDiv);
     }
 
     /** Latch this lane's parameters for a trigger.
@@ -470,7 +505,7 @@ private:
                             double ppqPerSample, bool isRetrigger, const float* modulated)
     {
         st.currentDivision = divIndex;
-        st.currentBlock = block;
+        st.currentBlock.set (block);
         fillLaneParams (lane, effect, scene, modulated);
 
         BlockContext ctx;
@@ -505,7 +540,7 @@ private:
             triggerBlockStart (st, effect, lane, block, divIndex, capture, scene,
                                divisionLenSamples, divisionBarFraction, nowAbs, ppqPerSample, false, modulated);
         }
-        else if (shouldBeActive && st.active && st.currentBlock != block)
+        else if (shouldBeActive && st.active && ! st.currentBlock.isSameBlockAs (block))
         {
             // Moved into a different block while still active.
             //
@@ -524,10 +559,10 @@ private:
             // no such seam -- its run simply continued across the wrap -- and without this
             // the divergence shows up precisely at the first loop boundary.
             const int totalDivs = scene.totalDivisions();
-            const bool adjacent = st.currentBlock != nullptr
+            const bool adjacent = st.currentBlock.valid
                                && block != nullptr
-                               && (st.currentBlock->endDiv() == block->startDiv
-                                   || (st.currentBlock->endDiv() >= totalDivs && block->startDiv == 0));
+                               && (st.currentBlock.endDiv() == block->startDiv
+                                   || (st.currentBlock.endDiv() >= totalDivs && block->startDiv == 0));
             const bool continuesRun = adjacent
                 && effect->getRetriggerPolicy() == RetriggerPolicy::ContinueThroughRun;
 
@@ -537,7 +572,7 @@ private:
             {
                 // Adopt the new block for progress bookkeeping without re-latching the
                 // effect's anchor or envelope.
-                st.currentBlock = block;
+                st.currentBlock.set (block);
                 if (st.fadeDirection < 0)
                     st.fadeDirection = 1;
             }
@@ -609,7 +644,7 @@ private:
                 {
                     st.active = false;
                     st.currentDivision = -1;
-                    st.currentBlock = nullptr;
+                    st.currentBlock = {};
                     if (effect != nullptr)
                         effect->onBlockEnd();
                 }
