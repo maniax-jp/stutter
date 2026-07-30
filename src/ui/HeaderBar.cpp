@@ -220,19 +220,30 @@ namespace
     else about the row -- the tick, the highlight, the text position -- is drawn by the menu's
     own item renderer so it stays indistinguishable from the factory rows around it.
 */
+/** Row height for the preset menu. Compact enough that the whole list fits one column --
+    see showPresetMenu for why that matters -- and shared so custom rows match plain ones. */
+constexpr int standardItemHeight = 20;
+
 class UserPresetMenuItem : public juce::PopupMenu::CustomComponent
 {
 public:
-    UserPresetMenuItem (juce::String presetName, bool isTicked, bool& rightClickFlag)
-        : name (std::move (presetName)), ticked (isTicked), wasRightClicked (&rightClickFlag)
+    UserPresetMenuItem (juce::String presetName, bool isTicked, HeaderBar::PresetRowClickState& clickState)
+        // autoTrigger=false: with the default (true) the menu window triggers the item on
+        // mouse-up by itself and never calls mouseUp here, so a right-click could not be
+        // distinguished from a left one -- it just loaded the preset.
+        : juce::PopupMenu::CustomComponent (false),
+          name (std::move (presetName)), ticked (isTicked), state (&clickState)
     {
     }
 
     void getIdealSize (int& idealWidth, int& idealHeight) override
     {
-        // Ask the look-and-feel for the same metrics a plain item would get, so this row lines
-        // up with its neighbours instead of setting its own height.
-        getLookAndFeel().getIdealPopupMenuItemSize (name, false, -1, idealWidth, idealHeight);
+        // Pass the same standard height the menu was shown with, so this row lines up with the
+        // plain ones around it. Asking with -1 makes the look-and-feel pick its own default,
+        // which is taller than the compact height the preset list uses and left user rows
+        // standing proud of their neighbours.
+        getLookAndFeel().getIdealPopupMenuItemSize (name, false, standardItemHeight,
+                                                    idealWidth, idealHeight);
     }
 
     void paint (juce::Graphics& g) override
@@ -240,28 +251,98 @@ public:
         getLookAndFeel().drawPopupMenuItem (g, getLocalBounds(),
                                             false,              // isSeparator
                                             true,               // isActive
-                                            isItemHighlighted(),
+                                            isItemHighlighted() && ! showingDelete,
                                             ticked,
                                             false,              // hasSubMenu
                                             name, {}, nullptr, nullptr);
+
+        if (! showingDelete)
+            return;
+
+        // Drawn over the row rather than in a menu of its own. A second PopupMenu dismisses
+        // the first, so the list vanished and "Delete..." floated with nothing to say which
+        // preset it belonged to. Painted in place, it stays anchored to its row.
+        const auto box = deleteBounds().toFloat();
+
+        g.setColour (Palette::bg0.withAlpha (0.96f));
+        g.fillRoundedRectangle (box, 3.0f);
+        g.setColour (Palette::accent.withAlpha (0.8f));
+        g.drawRoundedRectangle (box, 3.0f, 1.0f);
+
+        g.setColour (deleteHot ? Palette::textHi : Palette::textLo);
+        g.setFont (juce::Font (juce::FontOptions ((float) standardItemHeight * 0.55f)));
+        g.drawText ("Delete...", box, juce::Justification::centred, false);
     }
 
     void mouseUp (const juce::MouseEvent& e) override
     {
-        // Record which button dismissed the menu, then let the normal item-triggered path
-        // carry the row's ID out. The caller reads the flag to decide load vs delete, which
-        // keeps all the routing in one place rather than firing a second menu from in here.
-        if (wasRightClicked != nullptr)
-            *wasRightClicked = e.mods.isPopupMenu();
+        if (showingDelete)
+        {
+            // Inside the box commits; anywhere else on the row just puts it away, so a stray
+            // click cannot delete a preset.
+            const bool hit = deleteBounds().contains (e.getPosition());
+            showingDelete = false;
+
+            if (hit && state != nullptr)
+            {
+                state->wasRightClick = true;
+                triggerMenuItem();
+                return;
+            }
+
+            repaint();
+            return;
+        }
+
+        if (e.mods.isPopupMenu())
+        {
+            // Offer the action, do not perform it: a right-click reveals Delete on this row
+            // and leaves the list open so the user can see what they are about to remove.
+            showingDelete = true;
+            deleteHot = false;
+            repaint();
+            return;
+        }
+
+        if (state != nullptr)
+            state->wasRightClick = false;
 
         triggerMenuItem();
     }
 
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        if (! showingDelete)
+            return;
+
+        const bool hot = deleteBounds().contains (e.getPosition());
+        if (hot != deleteHot)
+        {
+            deleteHot = hot;
+            repaint();
+        }
+    }
+
+    /** True while this row is offering Delete, so the menu knows not to treat a move onto
+        another row as a plain highlight change. */
+    bool isOfferingDelete() const noexcept { return showingDelete; }
+
 private:
+    juce::Rectangle<int> deleteBounds() const
+    {
+        // Right-aligned, inset a little: it sits over the row's own text without hiding the
+        // start of the name, which is what identifies the preset.
+        const int w = juce::jmin (getWidth() - 8, 78);
+        return getLocalBounds().removeFromRight (w + 6).reduced (3, 2);
+    }
+
     juce::String name;
     bool ticked;
-    bool* wasRightClicked = nullptr;
+    HeaderBar::PresetRowClickState* state = nullptr;
+    bool showingDelete = false;
+    bool deleteHot = false;
 };
+
 } // namespace
 
 void HeaderBar::showPresetMenu()
@@ -270,19 +351,42 @@ void HeaderBar::showPresetMenu()
     const auto& presets = pm.getPresets();
 
     // One ID range: item (i + 1) loads preset i. PopupMenu reserves 0 for "nothing chosen".
-    // Deleting is not offered here at all -- see showUserPresetContextMenu.
+    // Deleting is offered by the user rows themselves -- see UserPresetMenuItem.
     juce::PopupMenu menu;
     juce::String currentCategory;
     int itemId = 1; // PopupMenu item IDs must be non-zero
+
+    // The list is taller than any sane window, so it will be split across columns. Left to
+    // itself JUCE divides by item count and thinks nothing of the section headers -- a column
+    // began right below "Gate & Sidechain", orphaning the heading from the presets it names.
+    // Breaking at category boundaries keeps each heading with its contents.
+    constexpr int rowsPerColumn = 26;
+    int rowsInColumn = 0;
 
     for (int i = 0; i < (int) presets.size(); ++i)
     {
         const auto& entry = presets[(size_t) i];
         if (entry.category != currentCategory)
         {
+            // Count how many rows this category needs, and start a new column if it will not
+            // fit -- rather than letting the split land wherever the arithmetic falls.
+            int categoryRows = 1;   // the heading
+            for (int j = i; j < (int) presets.size()
+                            && presets[(size_t) j].category == entry.category; ++j)
+                ++categoryRows;
+
+            if (rowsInColumn > 0 && rowsInColumn + categoryRows > rowsPerColumn)
+            {
+                menu.addColumnBreak();
+                rowsInColumn = 0;
+            }
+
             currentCategory = entry.category;
             menu.addSectionHeader (currentCategory);
+            ++rowsInColumn;
         }
+
+        ++rowsInColumn;
 
         const bool isCurrent = (i == pm.getCurrentIndex());
 
@@ -297,34 +401,48 @@ void HeaderBar::showPresetMenu()
             // step to shelter the rare one -- and it hid the tick, so there was no way to see
             // which user preset was loaded.
             auto item = std::make_unique<UserPresetMenuItem> (entry.name, isCurrent,
-                                                              rightClickedInPresetMenu);
+                                                              presetRowClick);
             menu.addCustomItem (itemId, std::move (item), nullptr, entry.name);
         }
 
         ++itemId;
     }
 
-    // Cleared before every showing; a user row sets it on the way out if the click that
-    // dismissed the menu was a right-click.
-    rightClickedInPresetMenu = false;
+    // Cleared before every showing; a user row fills it in on the way out.
+    presetRowClick = {};
 
     // showMenuAsync's callback can likewise fire after this HeaderBar has been destroyed; guard
     // with a SafePointer the same way as the dialogs above.
     juce::Component::SafePointer<HeaderBar> safeThis (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetNameButton),
+    // Parent the menu to the editor rather than letting it float as its own desktop window.
+    // A free-floating menu keeps its screen position, so dragging the plugin window out from
+    // under it left the list stranded where the window used to be.
+    //
+    // A tighter item height keeps the whole list in one column. JUCE splits an over-long menu
+    // into columns by dividing the item count evenly, with no regard for the section headers,
+    // so a second column started immediately below a heading and orphaned it from the presets
+    // it names. Fitting the list vertically avoids the split entirely.
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetComponent (presetNameButton)
+                            .withParentComponent (getTopLevelComponent())
+                            .withStandardItemHeight (standardItemHeight),
         [safeThis] (int result)
         {
             if (result <= 0 || safeThis == nullptr)
                 return;
 
-            if (safeThis->rightClickedInPresetMenu)
+            const int presetIndex = result - 1;
+
+            // The row itself already offered Delete in place and the user committed to it --
+            // see UserPresetMenuItem. Nothing more to ask.
+            if (safeThis->presetRowClick.wasRightClick)
             {
-                safeThis->rightClickedInPresetMenu = false;
-                safeThis->confirmDeleteUserPreset (result - 1);
+                safeThis->presetRowClick = {};
+                safeThis->confirmDeleteUserPreset (presetIndex);
                 return;
             }
 
-            safeThis->proc.getPresetManager().loadPreset (result - 1);
+            safeThis->proc.getPresetManager().loadPreset (presetIndex);
         });
 }
 

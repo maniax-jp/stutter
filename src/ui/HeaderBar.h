@@ -25,6 +25,16 @@ public:
         even a single-frame stale name flash). */
     void refreshPresetLabel();
 
+    /** Filled in by a user-preset row on the way out of the preset menu: whether the click was
+        a right-click, and where that row sat on screen. The dismissal callback uses both to
+        offer Delete at the row the user actually clicked. Public only because the menu row
+        component in the .cpp writes to it. */
+    struct PresetRowClickState
+    {
+        bool wasRightClick = false;
+        juce::Rectangle<int> rowScreenBounds;
+    };
+
 private:
     /** Swap each knob's caption between its name and its current value, depending on whether
         the mouse is over it. Cheap enough to call from the existing timer. */
@@ -39,9 +49,8 @@ private:
     void showSaveDialog();
     void confirmDeleteUserPreset (int presetIndex);
 
-    /** Set by a user-preset row in the preset menu when the click that dismissed the menu was
-        a right-click, so the callback can route that row to Delete instead of Load. */
-    bool rightClickedInPresetMenu = false;
+
+    PresetRowClickState presetRowClick;
 
     StutterAudioProcessor& proc;
 
