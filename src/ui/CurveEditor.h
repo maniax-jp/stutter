@@ -71,6 +71,10 @@ private:
     juce::Point<float> lastDragScreenPos;
     int hoverPointIndex = -1;
 
+    /** Which scene the curves last belonged to, so the timer can spot a scene change and
+        repaint the plot -- the shape swaps underneath without any control changing. */
+    int lastShaperScene = -1;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CurveEditor)
 };
 

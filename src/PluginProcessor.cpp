@@ -21,6 +21,12 @@
 
 using namespace stutter;
 
+namespace
+{
+/** Index-matched to ModTarget / StutterAudioProcessor::curves. */
+const juce::Identifier shaperCurveNames[] = { { "Volume" }, { "Filter" }, { "Pan" } };
+}
+
 
 //==============================================================================
 StutterAudioProcessor::StutterAudioProcessor()
@@ -78,6 +84,20 @@ StutterAudioProcessor::StutterAudioProcessor()
 
     sceneDocument = std::make_unique<stutter::SceneDocument> (sceneStore, undoManager);
     presetManager = std::make_unique<stutter::PresetManager> (*this);
+
+    // A fresh instance reports itself as being on "Init" (PresetManager::getCurrentPresetName
+    // falls back to it before anything is loaded), so it has to actually BE Init rather than
+    // merely be default-constructed. The two differ in exactly one respect: Init arms all three
+    // shaping curves while leaving them flat, whereas a default curve is flat and OFF. Without
+    // this the plugin opened claiming Init with three dark lamps -- the header and the switches
+    // disagreeing about the same patch.
+    for (auto& c : curves)
+        c.setEnabled (true);
+
+    // Give the opening scene those curves, so it is a real scene carrying real state rather
+    // than an empty slot that happens to be selected.
+    shaperCurveScene = stutter::defaultSceneIndex;
+    storeShaperCurvesToCurrentScene();
 
     // Mirror write-back. APVTS holds a copy of the active scene's lane values, so an edit that
     // stops there is discarded the next time a scene change refills the mirror -- which is
@@ -556,7 +576,30 @@ void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // *published* bank, so saving from it would silently drop edits made since the last
     // publish. setStateInformation feeds this same node straight back to the store.
     if (sceneDocument != nullptr)
-        state.appendChild (sceneDocument->getState().createCopy(), nullptr);
+    {
+        auto scenesCopy = sceneDocument->getState().createCopy();
+
+        // Fold the live curves into the *copy* for the scene they belong to. They are the
+        // newest version of that scene's shapes -- an edit since the last scene change exists
+        // only in the CurveModulator objects -- but writing them back through the document
+        // would mutate shared state, and the JUCE contract does not promise this runs on the
+        // message thread. Editing the throwaway copy keeps the save self-contained.
+        if (shaperCurveScene >= 0)
+            for (int i = 0; i < scenesCopy.getNumChildren(); ++i)
+            {
+                auto sceneCopy = scenesCopy.getChild (i);
+                if (! sceneCopy.hasType (stutter::SceneIDs::scene)
+                    || (int) sceneCopy.getProperty (stutter::SceneIDs::index, -1) != shaperCurveScene)
+                    continue;
+
+                sceneCopy.removeChild (
+                    sceneCopy.getChildWithName (stutter::SceneIDs::shaperCurvesNode), nullptr);
+                sceneCopy.appendChild (buildShaperCurvesTree(), nullptr);
+                break;
+            }
+
+        state.appendChild (scenesCopy, nullptr);
+    }
 
     // Which scene was live, so reopening a project returns to it rather than to whichever
     // scene happens to come first in the bank.
@@ -746,6 +789,30 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
         curves[i].fromValueTree (matchedCurve);
     }
 
+    // Migrate a state written before the curves became per-scene. Such a state carries exactly
+    // one global set -- the one just loaded into `curves` above -- and its scenes have no
+    // <ShaperCurves> of their own, so copy it into each of them. Presets built by this build
+    // already write curves into their scene and are left untouched.
+    if (sceneDocument != nullptr)
+    {
+        auto scenesState = sceneDocument->getState();
+        const auto migrated = buildShaperCurvesTree();
+
+        for (int i = 0; i < scenesState.getNumChildren(); ++i)
+        {
+            auto sceneTree = scenesState.getChild (i);
+            if (sceneTree.hasType (stutter::SceneIDs::scene)
+                && ! sceneTree.getChildWithName (stutter::SceneIDs::shaperCurvesNode).isValid())
+                sceneTree.appendChild (migrated.createCopy(), nullptr);
+        }
+    }
+
+    // Stamp which scene the live curves belong to without re-reading them: they are already
+    // correct, and reloading here would put them back to neutral for a state whose scenes the
+    // loop above has just seeded. Without the stamp the first scene change would write these
+    // curves back into the wrong slot.
+    shaperCurveScene = restoredScene >= 0 ? restoredScene : sceneSelector.getActiveScene();
+
     // Re-assert the restored scene onto the parameter. apvts.replaceState() above has just
     // reset sceneSelect to its default for any session saved before the parameter existed,
     // and processChunk polls that parameter every block -- without this, the scene resolved
@@ -771,6 +838,72 @@ void StutterAudioProcessor::timerCallback()
     mirrorActiveSceneToApvts();
 }
 
+void StutterAudioProcessor::loadShaperCurvesForScene (int scene)
+{
+    if (sceneDocument == nullptr)
+        return;
+
+    // Read-only: this runs on every scene change, including changes onto slots the user has
+    // never touched, and materialising those would make an empty scene count as real.
+    const auto sceneTree = sceneDocument->findScene (scene);
+    const auto curvesTree = sceneTree.isValid()
+                              ? sceneTree.getChildWithName (stutter::SceneIDs::shaperCurvesNode)
+                              : juce::ValueTree();
+
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+        juce::ValueTree stored;
+        if (curvesTree.isValid())
+            for (int c = 0; c < curvesTree.getNumChildren(); ++c)
+            {
+                const auto child = curvesTree.getChild (c);
+                if (child.getProperty (ID::propName).toString() == shaperCurveNames[i].toString())
+                {
+                    stored = child;
+                    break;
+                }
+            }
+
+        // An invalid tree makes fromValueTree reset to this curve's own neutral default --
+        // flat and enabled -- which is exactly what an untouched scene should sound like.
+        curves[i].fromValueTree (stored);
+    }
+
+    shaperCurveScene = scene;
+}
+
+void StutterAudioProcessor::storeShaperCurvesToCurrentScene()
+{
+    if (sceneDocument == nullptr || shaperCurveScene < 0)
+        return;
+
+    // A write, so creating the scene is correct here: the user has drawn a curve against this
+    // slot, which is precisely what makes it a scene worth storing.
+    auto sceneTree = sceneDocument->ensureScene (shaperCurveScene);
+    if (! sceneTree.isValid())
+        return;
+
+    sceneTree.removeChild (sceneTree.getChildWithName (stutter::SceneIDs::shaperCurvesNode), nullptr);
+
+    // Not undoable, and not published: these curves are read straight off the live
+    // CurveModulator objects by the audio thread, never out of the baked bank, so there is
+    // nothing for publish() to hand over. Putting a scene switch in the undo history would
+    // also make undo replay navigation rather than edits.
+    sceneTree.appendChild (buildShaperCurvesTree(), nullptr);
+}
+
+juce::ValueTree StutterAudioProcessor::buildShaperCurvesTree() const
+{
+    juce::ValueTree curvesTree (stutter::SceneIDs::shaperCurvesNode);
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+        auto curveTree = curves[i].toValueTree();
+        curveTree.setProperty (ID::propName, shaperCurveNames[i].toString(), nullptr);
+        curvesTree.appendChild (curveTree, nullptr);
+    }
+    return curvesTree;
+}
+
 void StutterAudioProcessor::mirrorActiveSceneToApvts()
 {
     // The audio thread only ever flags which scene became active; it never touches APVTS.
@@ -780,11 +913,24 @@ void StutterAudioProcessor::mirrorActiveSceneToApvts()
     if (scene < 0 || sceneDocument == nullptr)
         return;
 
-    auto sceneTree = sceneDocument->ensureScene (scene);
-    if (! sceneTree.isValid())
-        return;
+    // The Volume/Filter/Pan curves are per-scene too, so they ride the same signal the lane
+    // parameters do. Save the outgoing scene's shapes before loading the incoming ones, or
+    // switching away from a scene discards whatever was just drawn on it.
+    if (shaperCurveScene != scene)
+    {
+        storeShaperCurvesToCurrentScene();
+        loadShaperCurvesForScene (scene);
+    }
 
-    auto laneParams = sceneTree.getChildWithName (stutter::SceneIDs::laneParams);
+    // Read-only. The mirror already treats a scene that omits a lane as "show the descriptor
+    // defaults", so a scene that does not exist at all needs no different handling -- and
+    // creating one here made merely *selecting* an empty slot turn it into a real scene, which
+    // the sequencer then treats as playable and the grid draws as populated.
+    auto sceneTree = sceneDocument->findScene (scene);
+
+    auto laneParams = sceneTree.isValid()
+                        ? sceneTree.getChildWithName (stutter::SceneIDs::laneParams)
+                        : juce::ValueTree();
 
     // Suppress the write-back listener for the duration. Without this the parameter changes
     // below would be read as user edits and written straight back into the scene we are
@@ -921,10 +1067,15 @@ void StutterAudioProcessor::loadInitState()
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
             ranged->setValueNotifyingHost (ranged->getDefaultValue());
 
-    // An invalid tree makes each curve fall back to its own neutral value (see
-    // ID::neutralValueForCurve) -- the same path Test C exercises for malformed state.
+    // Init arms all three curves while leaving them flat, which is NOT what a default-
+    // constructed CurveModulator does (that is flat and OFF -- see resetToDefault). Resetting
+    // to the default here left a plugin whose header said "Init" holding a state Init would
+    // never produce: three dark lamps under a preset name that promises three lit ones.
     for (size_t i = 0; i < curves.size(); ++i)
+    {
         curves[i].fromValueTree (juce::ValueTree {});
+        curves[i].setEnabled (true);
+    }
 
     // Scenes are structural, so resetting parameters does not touch them. Without this an
     // Init -- including the fallback taken when a state load is rejected -- would leave the

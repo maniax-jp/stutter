@@ -63,6 +63,21 @@ public:
         return curves[(size_t) target];
     }
 
+    /**
+        Write the live Volume/Filter/Pan curves back into the scene they were loaded for.
+
+        The curves are per-scene, but the audio path reads them from these three live objects
+        rather than from the baked bank, so an edit exists only here until it is folded back.
+        The curve editor calls this after every edit -- otherwise switching scene and returning
+        would show the shape the scene was last *saved* with, silently discarding the drawing.
+
+        Message thread only.
+    */
+    void storeShaperCurvesToCurrentScene();
+
+    /** Which scene the live curves belong to; -1 before the first load. */
+    int getShaperCurveScene() const noexcept { return shaperCurveScene; }
+
     stutter::PresetManager& getPresetManager() noexcept { return *presetManager; }
 
     /** For UI: current effective BPM/PPQ/playhead-step, updated once per block. Lock-free reads. */
@@ -98,6 +113,14 @@ private:
         write-back listener must be suppressed while it runs. */
     void mirrorActiveSceneToApvts();
 
+    /** Load `scene`'s Volume/Filter/Pan shaping curves into the live curve objects, and stamp
+        which scene they came from. A scene with no stored curves gets the neutral default set
+        (flat, OFF) rather than the previous scene's shapes. Message thread only. */
+    void loadShaperCurvesForScene (int scene);
+
+    /** The live curves as a <ShaperCurves> node, ready to hang off a <Scene>. */
+    juce::ValueTree buildShaperCurvesTree() const;
+
     /** Flush parameter edits that arrived since the last call into their scene.
         Message thread only; driven by the processor's timer. */
     void flushPendingLaneParamWrites();
@@ -111,11 +134,13 @@ private:
 
     stutter::CaptureBuffer captureBuffer;
 
-    // Order matches ModTarget: Volume, Filter, Pan. Each starts enabled + flat at its own
-    // neutral value (see stutter::ID::neutralValueForCurve, the single source of truth: 0.5 =
+    // Order matches ModTarget: Volume, Filter, Pan. Each starts OFF and flat at its own neutral
+    // value (see stutter::ID::neutralValueForCurve, the single source of truth: 0.5 =
     // unity/center for Volume/Pan; 1.0 = fully-open 20kHz cutoff for Filter, since Filter's 0..1
     // range maps exponentially to 200Hz..20kHz and 0.5 would be an audible ~2kHz cut) so a
-    // freshly-instantiated plugin is acoustically transparent, matching the Init preset exactly.
+    // freshly-instantiated plugin is acoustically transparent. OFF rather than ON because a flat
+    // curve is not shaping anything and the tab lamps read that flag; the Init preset arms all
+    // three deliberately, which is a choice it records rather than the default showing through.
     std::array<stutter::CurveModulator, (size_t) stutter::ModTarget::Count> curves {
         stutter::CurveModulator (stutter::ID::neutralValueForCurve (stutter::ID::curveNameVolume)),
         stutter::CurveModulator (stutter::ID::neutralValueForCurve (stutter::ID::curveNameFilter)),
@@ -232,6 +257,11 @@ private:
 
     /** Which scene APVTS currently reflects; -1 before the first mirror. */
     int mirroredScene = -1;
+
+    /** Which scene the live Volume/Filter/Pan curves currently hold, so an edit can be written
+        back to the scene it belongs to rather than to whatever became active since. -1 before
+        the first load. */
+    int shaperCurveScene = -1;
 
     /** One per lane parameter, so the callback already knows which lane and slot it is for
         rather than parsing "lane3_decay" back apart on every knob move.

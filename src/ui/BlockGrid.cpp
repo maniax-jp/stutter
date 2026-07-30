@@ -423,7 +423,13 @@ void BlockGrid::paint (juce::Graphics& g)
     }
 
     // --- Blocks --------------------------------------------------------------------------
-    auto scene = doc.ensureScene (sceneIndex);
+    // Read-only: painting must not create the scene it is drawing. ensureScene() here
+    // materialised a node for whatever slot the user selected, and an empty <Scene> counts as
+    // real everywhere downstream -- so selecting an undefined scene and then loading a preset
+    // showed that preset's blocks (published into its own slot) in a slot that holds nothing.
+    // The grid claimed a pattern the audio path was not playing, which is exactly backwards
+    // from a display whose job is to say what is happening.
+    auto scene = doc.findScene (sceneIndex);
     auto blocks = scene.getChildWithName (SceneIDs::blocksNode);
     if (blocks.isValid())
     {

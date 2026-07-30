@@ -16,6 +16,11 @@ constexpr const char* kUserPresetFileExtension = ".xml";
 // Curve names in the fixed order used by getStateInformation/setStateInformation.
 const juce::Identifier curveNameIds[] = { { "Volume" }, { "Filter" }, { "Pan" } };
 
+/** Sync division a curve gets when a preset does not name one. Index 4 of the 1/1..1/16 list
+    the curve editor shows, i.e. the shortest cycle -- kept as a named constant because the
+    scene's <ShaperCurves> and the legacy top-level <Curves> both have to agree on it. */
+constexpr int defaultSyncDiv = 4;
+
 /** Builds a "PARAMETERS" (matches the APVTS ctor's root tag) ValueTree with every registered
     parameter set to its default value, as a PARAM child (id/value), exactly matching the shape
     AudioProcessorValueTreeState::copyState()/replaceState() expect. This is the base every
@@ -90,6 +95,49 @@ void setParamValue (juce::ValueTree& parametersTree, const juce::String& paramId
     parametersTree.appendChild (param, nullptr);
 }
 
+juce::ValueTree buildCurveTree (const juce::String& name, bool enabled, int syncDiv,
+                                 const std::vector<FactoryPresetDef::CurvePointDef>& points)
+{
+    juce::ValueTree curveTree (ID::curveNode);
+    curveTree.setProperty (ID::propName, name, nullptr);
+    curveTree.setProperty (ID::propEnabled, enabled, nullptr);
+    curveTree.setProperty (ID::propSyncDiv, syncDiv, nullptr);
+
+    // Default flat line (matches CurveModulator's own neutral default) when a preset leaves a
+    // curve untouched -- still needs >=2 points for CurveModulator::fromValueTree to accept it.
+    if (points.empty())
+    {
+        const float neutral = ID::neutralValueForCurve (name);
+        curveTree.appendChild ([&] {
+            juce::ValueTree pt (ID::pointNode);
+            pt.setProperty (ID::propPosition, 0.0f, nullptr);
+            pt.setProperty (ID::propValue, neutral, nullptr);
+            pt.setProperty (ID::propCurvature, 0.0f, nullptr);
+            return pt;
+        }(), nullptr);
+        curveTree.appendChild ([&] {
+            juce::ValueTree pt (ID::pointNode);
+            pt.setProperty (ID::propPosition, 1.0f, nullptr);
+            pt.setProperty (ID::propValue, neutral, nullptr);
+            pt.setProperty (ID::propCurvature, 0.0f, nullptr);
+            return pt;
+        }(), nullptr);
+    }
+    else
+    {
+        for (auto& p : points)
+        {
+            juce::ValueTree pt (ID::pointNode);
+            pt.setProperty (ID::propPosition, p.position, nullptr);
+            pt.setProperty (ID::propValue, p.value, nullptr);
+            pt.setProperty (ID::propCurvature, p.curvature, nullptr);
+            curveTree.appendChild (pt, nullptr);
+        }
+    }
+
+    return curveTree;
+}
+
 /** Turn a v1 16-step grid into a single v2 scene.
 
     v1's fixed grid is exactly beats=4 x divisions=4, so a step maps to a division with no
@@ -106,7 +154,14 @@ juce::ValueTree buildScenesTreeFromSteps (StutterAudioProcessor& proc,
     const auto& stepsOn = def.stepsOn;
 
     juce::ValueTree scenes (SceneIDs::scenesNode);
-    if (stepsOn.empty())
+
+    // A preset with no steps at all still gets a scene, as long as it shapes something with a
+    // curve. Five factory presets are exactly that -- Auto Pan Groove, Sidechain Pump, Slow
+    // Pump 1/2, Choppy Square, Saw Fade Loop -- every lane off, the curves doing all the work.
+    // Returning an empty <Scenes> for them left the curves with nowhere to live, so they only
+    // applied to whichever scene happened to be current. A scene carrying curves and no lanes
+    // is a perfectly ordinary scene; only a preset that shapes nothing at all has none.
+    if (stepsOn.empty() && def.curves.empty())
         return scenes;
 
     std::array<std::array<bool, numSteps>, numLanes> grid {};
@@ -115,11 +170,10 @@ juce::ValueTree buildScenesTreeFromSteps (StutterAudioProcessor& proc,
             grid[(size_t) s.lane][(size_t) s.step] = true;
 
     juce::ValueTree scene (SceneIDs::scene);
-    // Scene 60 (C4), not scene 0. These presets have no note mapping of their own, so the
-    // index is free -- and C4 is both where the scene browser opens and where the factory
-    // banks start, so the pattern is visible in the grid the moment the preset loads. Writing
-    // it to scene 0 plays correctly but shows the user an empty grid, which reads as a preset
-    // that failed to load.
+    // The default scene (1), not slot 0. Slot 0 is reserved to mean "no scene", and writing
+    // there plays correctly but shows the user an empty grid, which reads as a preset that
+    // failed to load. Scene 1 is where the browser opens, what sceneSelect defaults to, and
+    // where the factory banks start, so the pattern is visible the moment the preset loads.
     scene.setProperty (SceneIDs::index, ui::SceneBrowser::defaultScene, nullptr);
     scene.setProperty (SceneIDs::beats, 4, nullptr);
     scene.setProperty (SceneIDs::divisions, 4, nullptr);
@@ -191,6 +245,34 @@ juce::ValueTree buildScenesTreeFromSteps (StutterAudioProcessor& proc,
     if (laneParams.getNumChildren() > 0)
         scene.appendChild (laneParams, nullptr);
 
+    // The Volume/Filter/Pan curves live in the scene, so the preset's own curves have to be
+    // written here rather than only into the legacy top-level <Curves> node. Same content,
+    // re-tagged: the processor reads <ShaperCurves> off the scene it switches to, so without
+    // this a preset's curves would be replaced by the neutral default the first time the user
+    // moved scene and came back.
+    {
+        juce::ValueTree shaperCurves (SceneIDs::shaperCurvesNode);
+        for (auto& curveNameId : curveNameIds)
+        {
+            const juce::String name = curveNameId.toString();
+            const FactoryPresetDef::CurveDef* match = nullptr;
+            for (auto& c : def.curves)
+                if (c.name == name)
+                {
+                    match = &c;
+                    break;
+                }
+
+            // Curves the preset does not mention are stored flat and OFF, which is the default
+            // state of a curve: neutral, and contributing nothing until switched on.
+            shaperCurves.appendChild (
+                match != nullptr ? buildCurveTree (name, match->enabled, match->syncDiv, match->points)
+                                 : buildCurveTree (name, false, defaultSyncDiv, {}),
+                nullptr);
+        }
+        scene.appendChild (shaperCurves, nullptr);
+    }
+
     scenes.appendChild (scene, nullptr);
     return scenes;
 }
@@ -219,49 +301,6 @@ juce::ValueTree buildSequencerTree (const std::vector<FactoryPresetDef::StepOn>&
     return seqTree;
 }
 
-juce::ValueTree buildCurveTree (const juce::String& name, bool enabled, int syncDiv,
-                                 const std::vector<FactoryPresetDef::CurvePointDef>& points)
-{
-    juce::ValueTree curveTree (ID::curveNode);
-    curveTree.setProperty (ID::propName, name, nullptr);
-    curveTree.setProperty (ID::propEnabled, enabled, nullptr);
-    curveTree.setProperty (ID::propSyncDiv, syncDiv, nullptr);
-
-    // Default flat line (matches CurveModulator's own neutral default) when a preset leaves a
-    // curve untouched -- still needs >=2 points for CurveModulator::fromValueTree to accept it.
-    if (points.empty())
-    {
-        const float neutral = ID::neutralValueForCurve (name);
-        curveTree.appendChild ([&] {
-            juce::ValueTree pt (ID::pointNode);
-            pt.setProperty (ID::propPosition, 0.0f, nullptr);
-            pt.setProperty (ID::propValue, neutral, nullptr);
-            pt.setProperty (ID::propCurvature, 0.0f, nullptr);
-            return pt;
-        }(), nullptr);
-        curveTree.appendChild ([&] {
-            juce::ValueTree pt (ID::pointNode);
-            pt.setProperty (ID::propPosition, 1.0f, nullptr);
-            pt.setProperty (ID::propValue, neutral, nullptr);
-            pt.setProperty (ID::propCurvature, 0.0f, nullptr);
-            return pt;
-        }(), nullptr);
-    }
-    else
-    {
-        for (auto& p : points)
-        {
-            juce::ValueTree pt (ID::pointNode);
-            pt.setProperty (ID::propPosition, p.position, nullptr);
-            pt.setProperty (ID::propValue, p.value, nullptr);
-            pt.setProperty (ID::propCurvature, p.curvature, nullptr);
-            curveTree.appendChild (pt, nullptr);
-        }
-    }
-
-    return curveTree;
-}
-
 juce::ValueTree buildCurvesTree (const std::vector<FactoryPresetDef::CurveDef>& curveDefs)
 {
     juce::ValueTree curvesTree (ID::curvesNode);
@@ -284,7 +323,7 @@ juce::ValueTree buildCurvesTree (const std::vector<FactoryPresetDef::CurveDef>& 
             // way, since disabled short-circuits before the curve value is even read) but still
             // give it a fully-formed neutral-flat tree so no lane of the Curves node is ever
             // missing/incomplete.
-            curvesTree.appendChild (buildCurveTree (name, false, 4 /* default 1/4-ish */, {}), nullptr);
+            curvesTree.appendChild (buildCurveTree (name, false, defaultSyncDiv, {}), nullptr);
     }
 
     return curvesTree;
@@ -467,9 +506,13 @@ juce::ValueTree PresetManager::loadEntryState (const PresetEntry& entry) const
     {
         // Init: every parameter at its default, sequencer fully OFF, and -- per spec -- all
         // three curves (Volume/Filter/Pan) ON but each flat at its own neutral value, so Init is
-        // acoustically transparent (identical to a freshly-instantiated plugin) rather than
-        // silently applying a coloring effect (e.g. Filter flat at 0.5 previously meant an
-        // audible ~2kHz lowpass despite looking "off").
+        // acoustically transparent rather than silently applying a coloring effect (e.g. Filter
+        // flat at 0.5 previously meant an audible ~2kHz lowpass despite looking "off").
+        //
+        // These three `true`s are load-bearing and deliberate: ON is NOT the default state of a
+        // curve (CurveModulator::resetToDefault leaves them OFF, so a fresh instance shows no
+        // lamps). Init is a preset that chooses to arm all three while leaving them flat.
+        // Deleting them would not change how Init sounds -- only what it says it is doing.
         FactoryPresetDef initDef;
         initDef.name = "Init";
         initDef.category = "Init";

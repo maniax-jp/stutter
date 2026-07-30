@@ -35,22 +35,32 @@ public:
         target it modulates. CurveModulator itself doesn't know which target it belongs to, so
         callers should pass stutter::ID::neutralValueForCurve (curveName) -- the single source of
         truth for these numbers (0.5 for Volume/Pan, 1.0 for Filter; see ParameterIDs.h for why).
-        Every CurveModulator (freshly constructed, or reset via resetToDefault()) starts enabled +
-        flat at this value, so a freshly-instantiated plugin and a "reset to Init" plugin are
-        acoustically identical and both transparent (no audible change vs. the dry signal). */
+        Every CurveModulator (freshly constructed, or reset via resetToDefault()) starts flat at
+        this value and switched OFF -- see resetToDefault for why OFF rather than ON. */
     explicit CurveModulator (float neutralFlatValue = 0.5f) : neutralValue (neutralFlatValue)
     {
         resetToDefault();
     }
 
-    /** Restores this curve to its neutral flat line (2 points at neutralValue, curvature 0),
-        enabled, default sync division. Used both by the constructor and anywhere state needs to
-        be reset to "no-op" defaults (e.g. a preset that doesn't specify this curve at all). */
+    /**
+        Restores this curve to its default: a neutral flat line (2 points at neutralValue,
+        curvature 0), switched OFF, default sync division.
+
+        OFF, not ON. A curve that shapes nothing has no business reporting itself as active --
+        the tab lamps read this flag, so defaulting to ON lit three lamps on a plugin that was
+        doing nothing with any of them. Flat-and-ON and flat-and-OFF sound identical (the audio
+        path short-circuits on isEnabled), so this costs nothing acoustically and makes the
+        switch mean what it says.
+
+        The Init preset deliberately stores all three ON: that is a preset expressing a choice,
+        not the default leaking through. Anything that resets to "no-op" -- a fresh instance, a
+        preset that does not mention a curve -- lands here instead.
+    */
     void resetToDefault()
     {
         const std::lock_guard<std::mutex> lock (writeMutex);
         points = { { 0.0f, neutralValue, 0.0f }, { 1.0f, neutralValue, 0.0f } };
-        enabled.store (true, std::memory_order_relaxed);
+        enabled.store (false, std::memory_order_relaxed);
         syncDivIndex.store (4, std::memory_order_relaxed);
         bakeTable();
     }
@@ -201,7 +211,9 @@ public:
         }
 
         const std::lock_guard<std::mutex> lock (writeMutex);
-        enabled.store (tree.getProperty (ID::propEnabled, true), std::memory_order_relaxed);
+        // Absent means OFF, matching resetToDefault: a stored curve that never recorded the flag
+        // did not record a decision to be active either.
+        enabled.store (tree.getProperty (ID::propEnabled, false), std::memory_order_relaxed);
         syncDivIndex.store (tree.getProperty (ID::propSyncDiv, 4), std::memory_order_relaxed);
 
         if (pts.size() >= 2)

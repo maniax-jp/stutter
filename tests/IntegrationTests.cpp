@@ -8,6 +8,7 @@
 #include "PresetManager.h"
 #include "FactoryScenes.h"
 #include "ui/SceneBrowser.h"
+#include "ui/BlockGrid.h"
 #include "dsp/CurveModulator.h"
 #include "dsp/ModulationEngine.h"
 
@@ -226,6 +227,9 @@ TEST_CASE ("sequencerOn=false bypasses the lanes but leaves curves working", "[p
         {
             proc.getCurve (ModTarget::Volume).applyPreset ("SidechainDuck");
             proc.getCurve (ModTarget::Volume).setSyncDivision (2);
+            // Explicit: a curve's default state is flat and OFF, so drawing a shape into one
+            // does not by itself make it audible.
+            proc.getCurve (ModTarget::Volume).setEnabled (true);
         }
 
         juce::AudioBuffer<float> out (2, total);
@@ -1857,4 +1861,344 @@ TEST_CASE ("Parameter changes from many threads stay safe", "[processor][mirror]
     for (int l = 0; l < stutter::maxLanes; ++l)
         for (int p = 0; p < stutter::maxParamsPerLane; ++p)
             CHECK (std::isfinite (s->lanes[(size_t) l].params[(size_t) p]));
+}
+
+TEST_CASE ("Shaping curves belong to their scene", "[processor][curves][scene]")
+{
+    // Volume/Filter/Pan used to be one global set, which made them the only part of the bottom
+    // tab strip that did not follow the scene the rest of the editor was showing: switching
+    // scene changed the lanes and the mod routes but left these three alone.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    doc.ensureScene (60);
+    doc.ensureScene (61);
+    doc.publish();
+
+    proc.getSceneSelector().setActiveScene (60);
+    proc.pumpSceneMirror();
+
+    // A shape that is unmistakably not the neutral default, committed the way the editor does.
+    proc.getCurve (stutter::ModTarget::Volume).applyPreset ("SawDown");
+    // Armed on scene 60 only. The default is OFF, so this discriminates in the useful
+    // direction: scene 61 must NOT come up armed just because 60 was.
+    proc.getCurve (stutter::ModTarget::Pan).setEnabled (true);
+    proc.storeShaperCurvesToCurrentScene();
+
+    const float sawAtStart = proc.getCurve (stutter::ModTarget::Volume).getValueAtPhase (0.0f);
+    CHECK (sawAtStart > 0.9f); // SawDown starts high
+
+    // Switching away must leave scene 61 with its own default curves (neutral, OFF) rather
+    // than inheriting the ramp drawn against scene 60.
+    proc.getSceneSelector().setActiveScene (61);
+    proc.pumpSceneMirror();
+
+    CHECK (proc.getShaperCurveScene() == 61);
+    CHECK_FALSE (proc.getCurve (stutter::ModTarget::Pan).isEnabled());
+    const auto& vol61 = proc.getCurve (stutter::ModTarget::Volume);
+    const float neutral = ID::neutralValueForCurve (ID::curveNameVolume);
+    for (int i = 0; i < 8; ++i)
+        CHECK_THAT (vol61.getValueAtPhase ((float) i / 8.0f), WithinAbs (neutral, 1.0e-3f));
+
+    // ...and coming back has to restore what was drawn, not the neutral default.
+    proc.getSceneSelector().setActiveScene (60);
+    proc.pumpSceneMirror();
+
+    CHECK (proc.getShaperCurveScene() == 60);
+    CHECK (proc.getCurve (stutter::ModTarget::Pan).isEnabled());
+    CHECK_THAT (proc.getCurve (stutter::ModTarget::Volume).getValueAtPhase (0.0f),
+                WithinAbs (sawAtStart, 1.0e-4f));
+}
+
+TEST_CASE ("Per-scene curves survive a save and reload", "[processor][curves][state]")
+{
+    StutterAudioProcessor a;
+    a.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    a.getSceneDocument().ensureScene (60);
+    a.getSceneDocument().ensureScene (61);
+    a.getSceneDocument().publish();
+
+    a.getSceneSelector().setActiveScene (61);
+    a.pumpSceneMirror();
+    a.getCurve (stutter::ModTarget::Filter).applyPreset ("SawUp");
+    a.storeShaperCurvesToCurrentScene();
+    const float expected = a.getCurve (stutter::ModTarget::Filter).getValueAtPhase (0.25f);
+
+    juce::MemoryBlock saved;
+    a.getStateInformation (saved);
+
+    StutterAudioProcessor b;
+    b.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    b.setStateInformation (saved.getData(), (int) saved.getSize());
+    b.getSceneSelector().setActiveScene (61);
+    b.pumpSceneMirror();
+
+    CHECK_THAT (b.getCurve (stutter::ModTarget::Filter).getValueAtPhase (0.25f),
+                WithinAbs (expected, 1.0e-4f));
+}
+
+TEST_CASE ("A curve-only preset gets a scene of its own", "[presets][curves][compat]")
+{
+    // Five factory presets are curves and nothing else -- every lane off. They used to convert
+    // to an empty <Scenes>, which left their curves with no scene to live in, so they applied
+    // only to whatever scene happened to be current and were lost on the first scene change.
+    // A scene holding curves and no lanes is a perfectly ordinary scene.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager pm (proc);
+
+    auto indexOf = [&pm] (const juce::String& name)
+    {
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == name)
+                return i;
+        return -1;
+    };
+
+    for (const char* name : { "Auto Pan Groove", "Acid Wobble" })
+    {
+        const int idx = indexOf (name);
+        REQUIRE (idx >= 0);
+        pm.loadPreset (idx);
+
+        const int landed = proc.getSceneSelector().getActiveScene();
+        INFO (name << " landed on scene " << landed);
+
+        // The scene exists and carries the curves, rather than the curves floating free.
+        const auto scene = proc.getSceneDocument().findScene (landed);
+        REQUIRE (scene.isValid());
+        REQUIRE (scene.getChildWithName (stutter::SceneIDs::shaperCurvesNode).isValid());
+
+        // At least one curve is armed -- otherwise the preset does nothing at all.
+        bool anyArmed = false;
+        for (auto t : { stutter::ModTarget::Volume, stutter::ModTarget::Filter,
+                        stutter::ModTarget::Pan })
+            anyArmed = anyArmed || proc.getCurve (t).isEnabled();
+        CHECK (anyArmed);
+
+        // And it survives a round trip away from the scene and back, which is what having a
+        // real scene to store them in buys.
+        const float before = proc.getCurve (stutter::ModTarget::Pan).getValueAtPhase (0.25f);
+        const bool panArmed = proc.getCurve (stutter::ModTarget::Pan).isEnabled();
+
+        proc.getSceneSelector().setActiveScene (landed + 7);
+        proc.pumpSceneMirror();
+        proc.getSceneSelector().setActiveScene (landed);
+        proc.pumpSceneMirror();
+
+        CHECK (proc.getCurve (stutter::ModTarget::Pan).isEnabled() == panArmed);
+        CHECK_THAT (proc.getCurve (stutter::ModTarget::Pan).getValueAtPhase (0.25f),
+                    WithinAbs (before, 1.0e-4f));
+    }
+}
+
+TEST_CASE ("A project saved before per-scene curves still loads them", "[presets][curves][compat]")
+{
+    // Older projects carry one global <Curves> node and scenes with no <ShaperCurves>. The
+    // migration copies that set onto each scene, so such a project sounds as it did.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    // Build a state in the old shape: scenes without curves, plus a top-level <Curves>.
+    juce::ValueTree state ("PARAMETERS");
+    state.setProperty (stutter::SceneIDs::version, stutter::stateSchemaVersion, nullptr);
+
+    juce::ValueTree scenes (stutter::SceneIDs::scenesNode);
+    for (int idx : { 1, 2 })
+    {
+        juce::ValueTree sc (stutter::SceneIDs::scene);
+        sc.setProperty (stutter::SceneIDs::index, idx, nullptr);
+        sc.setProperty (stutter::SceneIDs::beats, 4, nullptr);
+        sc.setProperty (stutter::SceneIDs::divisions, 4, nullptr);
+        juce::ValueTree blocks (stutter::SceneIDs::blocksNode);
+        juce::ValueTree b (stutter::SceneIDs::block);
+        b.setProperty (stutter::SceneIDs::laneRef, StutterAudioProcessor::laneStutter, nullptr);
+        b.setProperty (stutter::SceneIDs::start, 0, nullptr);
+        b.setProperty (stutter::SceneIDs::length, 1, nullptr);
+        blocks.appendChild (b, nullptr);
+        sc.appendChild (blocks, nullptr);
+        scenes.appendChild (sc, nullptr);
+    }
+    state.appendChild (scenes, nullptr);
+
+    juce::ValueTree curves (ID::curvesNode);
+    juce::ValueTree pan (ID::curveNode);
+    pan.setProperty (ID::propName, "Pan", nullptr);
+    pan.setProperty (ID::propEnabled, true, nullptr);
+    pan.setProperty (ID::propSyncDiv, 3, nullptr);
+    for (int i = 0; i < 2; ++i)
+    {
+        juce::ValueTree pt (ID::pointNode);
+        pt.setProperty (ID::propPosition, (float) i, nullptr);
+        pt.setProperty (ID::propValue, i == 0 ? 0.0f : 1.0f, nullptr);
+        pt.setProperty (ID::propCurvature, 0.0f, nullptr);
+        pan.appendChild (pt, nullptr);
+    }
+    curves.appendChild (pan, nullptr);
+    state.appendChild (curves, nullptr);
+
+    std::unique_ptr<juce::XmlElement> xml (state.createXml());
+    juce::MemoryBlock block;
+    juce::AudioProcessor::copyXmlToBinary (*xml, block);
+    proc.setStateInformation (block.getData(), (int) block.getSize());
+
+    // The ramp has to survive on BOTH scenes, not just the one that loaded it.
+    for (int idx : { 1, 2 })
+    {
+        proc.getSceneSelector().setActiveScene (idx);
+        proc.pumpSceneMirror();
+        INFO ("scene " << idx);
+        CHECK (proc.getCurve (stutter::ModTarget::Pan).isEnabled());
+        CHECK_THAT (proc.getCurve (stutter::ModTarget::Pan).getValueAtPhase (0.25f),
+                    WithinAbs (0.25f, 0.02f));
+    }
+}
+
+TEST_CASE ("Selecting an undefined scene leaves it undefined", "[ui][scene]")
+{
+    // BlockGrid::paint called ensureScene, so merely looking at an empty slot created it -- and
+    // an empty <Scene> counts as real everywhere downstream. Selecting scene 2 and then loading
+    // a preset showed that preset's blocks in a slot holding nothing.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    const int empty = 2;
+    REQUIRE_FALSE (doc.findScene (empty).isValid());
+
+    // Everything the editor does when the user selects a scene and the timers tick.
+    proc.getSceneSelector().setActiveScene (empty);
+    proc.pumpSceneMirror();
+
+    stutter::ui::BlockGrid grid (proc, doc);
+    grid.setBounds (0, 0, 900, 400);
+    grid.setSceneIndex (empty);
+    {
+        juce::Image img (juce::Image::ARGB, 900, 400, true);
+        juce::Graphics g (img);
+        grid.paint (g);
+    }
+
+    CHECK_FALSE (doc.findScene (empty).isValid());
+    const auto* baked = proc.getSceneStore().get (empty);
+    if (baked != nullptr)
+        CHECK_FALSE (baked->populated);
+}
+
+TEST_CASE ("Curve tab lamps follow the ON switch", "[ui][curves]")
+{
+    // The lamps used to light on "the shape departs from neutral somewhere", which disagreed
+    // with the ON switch in both directions: Init has all three curves ON but flat, so nothing
+    // lit even though every switch said ON.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto neutralFor = [] (stutter::ModTarget t)
+    {
+        return ID::neutralValueForCurve (t == stutter::ModTarget::Volume ? ID::curveNameVolume
+                                       : t == stutter::ModTarget::Filter ? ID::curveNameFilter
+                                                                        : ID::curveNamePan);
+    };
+    const stutter::ModTarget allTargets[] = { stutter::ModTarget::Volume,
+                                              stutter::ModTarget::Filter,
+                                              stutter::ModTarget::Pan };
+
+    // A fresh instance opens on Init and must actually BE Init: all three armed, all three
+    // flat, so three lamps are lit under a header that says "Init".
+    for (auto t : allTargets)
+    {
+        CHECK (proc.getCurve (t).isEnabled());
+        CHECK_THAT (proc.getCurve (t).getValueAtPhase (0.37f), WithinAbs (neutralFor (t), 1.0e-3f));
+    }
+
+    // The default state of a *curve* is still flat and OFF -- that is what a scene with no
+    // stored curves falls back to. Init arming them is a property of the preset, not of
+    // CurveModulator, and the two must not be conflated.
+    {
+        stutter::CurveModulator fresh (0.5f);
+        CHECK_FALSE (fresh.isEnabled());
+    }
+
+    // The Init preset is different, and deliberately so: it arms all three while leaving them
+    // flat, so loading it lights three lamps. That is a choice Init records, not the default.
+    stutter::PresetManager pm (proc);
+    int initIdx = -1;
+    for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+        if (pm.getPresets()[(size_t) i].name == "Init")
+            initIdx = i;
+    REQUIRE (initIdx >= 0);
+    pm.loadPreset (initIdx);
+
+    for (auto t : allTargets)
+    {
+        CHECK (proc.getCurve (t).isEnabled());
+        CHECK_THAT (proc.getCurve (t).getValueAtPhase (0.37f), WithinAbs (neutralFor (t), 1.0e-3f));
+    }
+
+    // A curve switched OFF but still holding a drawn shape is the opposite case: it contributes
+    // nothing (applyGlobalModulators short-circuits on isEnabled), so its lamp must be dark.
+    proc.getCurve (stutter::ModTarget::Volume).applyPreset ("SawDown");
+    proc.getCurve (stutter::ModTarget::Volume).setEnabled (false);
+    CHECK_FALSE (proc.getCurve (stutter::ModTarget::Volume).isEnabled());
+}
+
+TEST_CASE ("A scene shaped only by curves reads as occupied", "[ui][scene][curves]")
+{
+    // The browser's fill said "has content", but the test behind it was blocks-only. A scene
+    // whose whole effect is its Volume/Filter/Pan curves -- Init itself, and the five
+    // curve-only factory presets -- therefore looked like an empty slot while it was audibly
+    // doing something.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    stutter::ui::SceneBrowser browser (proc, doc);
+
+    // A fresh instance is Init: no blocks anywhere, three armed (flat) curves on scene 1.
+    CHECK (browser.sceneHasContent (stutter::defaultSceneIndex));
+
+    // A slot that genuinely holds nothing stays dark.
+    CHECK_FALSE (browser.sceneHasContent (stutter::defaultSceneIndex + 5));
+
+    // Disarming every curve on a scene with no blocks empties it again.
+    for (auto t : { stutter::ModTarget::Volume, stutter::ModTarget::Filter, stutter::ModTarget::Pan })
+        proc.getCurve (t).setEnabled (false);
+    proc.storeShaperCurvesToCurrentScene();
+    CHECK_FALSE (browser.sceneHasContent (stutter::defaultSceneIndex));
+
+    // ...and a block alone is still enough, curves or no curves.
+    doc.addBlock (stutter::defaultSceneIndex, StutterAudioProcessor::laneStutter, 0, 1);
+    doc.publish();
+    CHECK (browser.sceneHasContent (stutter::defaultSceneIndex));
+}
+
+TEST_CASE ("The browser notices content added elsewhere", "[ui][scene]")
+{
+    // Occupancy is derived from the document, and nothing notifies the browser when that
+    // changes. The cell used to re-fill only when something else forced a repaint, so a newly
+    // filled scene could sit uncoloured until the user happened to move the mouse over it.
+    StutterAudioProcessor proc;
+    proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+
+    auto& doc = proc.getSceneDocument();
+    stutter::ui::SceneBrowser browser (proc, doc);
+    browser.setBounds (0, 0, 1200, 56);
+
+    const int empty = stutter::defaultSceneIndex + 4;
+    REQUIRE_FALSE (browser.sceneHasContent (empty));
+
+    // Adding a block is enough on its own -- no scene change, no click on the strip.
+    doc.addBlock (empty, StutterAudioProcessor::laneStutter, 0, 1);
+    doc.publish();
+    CHECK (browser.sceneHasContent (empty));
+
+    // Arming a curve on a lane-less scene counts the same way.
+    const int curveOnly = stutter::defaultSceneIndex + 5;
+    REQUIRE_FALSE (browser.sceneHasContent (curveOnly));
+    proc.getSceneSelector().setActiveScene (curveOnly);
+    proc.pumpSceneMirror();
+    proc.getCurve (stutter::ModTarget::Filter).setEnabled (true);
+    proc.storeShaperCurvesToCurrentScene();
+    CHECK (browser.sceneHasContent (curveOnly));
 }

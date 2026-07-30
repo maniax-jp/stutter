@@ -545,9 +545,9 @@ TEST_CASE ("Scene work survives a host save/restore round-trip", "[state][roundt
 TEST_CASE ("Factory modulation routes live on the scene the editor opens on", "[presets][ui]")
 {
     // The MOD panel reads curves from whichever scene index it was pointed at. Nothing used to
-    // point it anywhere, so it sat on scene 0 while the grid and browser followed the user --
-    // and since factory content starts at C4, the route table was empty for every preset that
-    // actually had routes.
+    // point it anywhere, so it sat on slot 0 while the grid and browser followed the user --
+    // and since slot 0 means "no scene" and factory content starts at scene 1, the route table
+    // was empty for every preset that actually had routes.
     auto bank = FactoryScenes::createBank (2);   // "Routed Modulation"
     REQUIRE (bank.isValid());
 

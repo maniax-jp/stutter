@@ -28,6 +28,7 @@ CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget t
     enableButton.onClick = [this]
     {
         curve().setEnabled (enableButton.getToggleState());
+        proc.storeShaperCurvesToCurrentScene();
         proc.getPresetManager().markDirty();
         repaint();
     };
@@ -40,7 +41,8 @@ CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget t
         btn->onClick = [this, name]
         {
             curve().applyPreset (name);
-            proc.getPresetManager().markDirty();
+            proc.storeShaperCurvesToCurrentScene();
+        proc.getPresetManager().markDirty();
             repaint();
         };
         addAndMakeVisible (*btn);
@@ -57,6 +59,7 @@ CurveEditor::CurveEditor (StutterAudioProcessor& processor, stutter::ModTarget t
         if (newIndex == curve().getSyncDivision())
             return;
         curve().setSyncDivision (newIndex);
+        proc.storeShaperCurvesToCurrentScene();
         proc.getPresetManager().markDirty();
         repaint();
     };
@@ -86,6 +89,16 @@ void CurveEditor::timerCallback()
         enableButton.setToggleState (en, juce::dontSendNotification);
 
     refreshSyncDivCombo();
+
+    // The curves are per-scene, and a scene change swaps the shape underneath us without
+    // touching the toggle or the combo. The plot is drawn from curve().getPoints() every
+    // paint, so it only needs to be told to repaint -- but nothing else would tell it.
+    const int scene = proc.getShaperCurveScene();
+    if (scene != lastShaperScene)
+    {
+        lastShaperScene = scene;
+        repaint();
+    }
 }
 
 juce::Rectangle<float> CurveEditor::getPlotArea() const
@@ -143,6 +156,7 @@ int CurveEditor::findSegmentIndex (float screenX, juce::Rectangle<float> plot) c
 void CurveEditor::pushPoints (std::vector<stutter::CurvePoint> pts)
 {
     curve().setPoints (std::move (pts));
+    proc.storeShaperCurvesToCurrentScene();
     proc.getPresetManager().markDirty();
     repaint();
 }

@@ -56,6 +56,15 @@ namespace SceneIDs
     static const juce::Identifier block       { "B" };
     static const juce::Identifier curvesNode  { "Curves" };
     static const juce::Identifier curve       { "Curve" };
+    /** The three global shaping curves (Volume / Filter / Pan), per scene.
+
+        Deliberately NOT <Curves> above: that node holds the v2 modulation ROUTES, which are a
+        different thing entirely -- a route says "drive lane 6's cutoff from this shape", while
+        these three are fixed-destination shapers on the output. They used to live outside the
+        scene tree altogether as one global set, which made VOLUME/FILTER/PAN the only tabs in
+        the bottom strip that did not follow the scene the rest of the editor was showing. */
+    static const juce::Identifier shaperCurvesNode { "ShaperCurves" };
+    static const juce::Identifier shaperCurve      { "ShaperCurve" };
     static const juce::Identifier point       { "Pt" };
     static const juce::Identifier weightsNode { "Weights" };
     static const juce::Identifier weight      { "W" };
