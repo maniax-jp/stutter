@@ -47,13 +47,21 @@ public:
         instead of staying on whatever was last clicked. Fires onSceneSelected. */
     void setSelectedScene (int sceneIndex);
 
+    /** True when the scene holds anything worth showing: at least one block, or at least one
+        armed shaping curve. Drives the browser cell's fill, and is public because "is this
+        slot in use" is a question about the scene rather than about this component. */
+    bool sceneHasContent (int sceneIndex) const;
+
 private:
     void timerCallback() override;
 
     /** Scene under a point, or -1. */
     int sceneAtPoint (juce::Point<int> p) const;
     juce::Rectangle<float> getCellBounds (int sceneIndex) const;
-    bool sceneHasContent (int sceneIndex) const;
+
+    /** Bitmask of which visible cells currently have content, so the timer can spot an edit
+        made elsewhere without repainting the strip on every tick. */
+    juce::uint64 currentOccupancy() const;
 
     StutterAudioProcessor& proc;
     SceneDocument& doc;
@@ -65,6 +73,10 @@ private:
     /** Leftmost visible slot. Starts at the default scene so a freshly loaded factory bank,
         which targets that slot and the ones just above it, opens in view. */
     int firstVisibleScene = defaultScene;
+
+    /** Occupancy as of the last repaint; compared against currentOccupancy() on each tick.
+        ~0 rather than 0 so the first tick always repaints rather than trusting a guess. */
+    juce::uint64 lastOccupancy = ~(juce::uint64) 0;
     static constexpr int visibleScenes = 24;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SceneBrowser)

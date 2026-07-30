@@ -48,7 +48,21 @@ bool SceneBrowser::sceneHasContent (int sceneIndex) const
         return false;
 
     auto blocks = scene.getChildWithName (SceneIDs::blocksNode);
-    return blocks.isValid() && blocks.getNumChildren() > 0;
+    if (blocks.isValid() && blocks.getNumChildren() > 0)
+        return true;
+
+    // An armed curve is content too. Blocks alone were the test, so a scene shaped entirely by
+    // its Volume/Filter/Pan curves -- Init itself, and the five curve-only factory presets --
+    // read as an empty slot while it was audibly doing something. Flat-but-armed still counts:
+    // the switch is on, and the user can draw into it without the cell changing meaning
+    // underneath them.
+    auto shaperCurves = scene.getChildWithName (SceneIDs::shaperCurvesNode);
+    if (shaperCurves.isValid())
+        for (int i = 0; i < shaperCurves.getNumChildren(); ++i)
+            if ((bool) shaperCurves.getChild (i).getProperty (ID::propEnabled, false))
+                return true;
+
+    return false;
 }
 
 void SceneBrowser::setSelectedScene (int sceneIndex)
@@ -124,6 +138,28 @@ void SceneBrowser::timerCallback()
 
         repaint();
     }
+
+    // Occupancy is derived from the document, and nothing tells this component when that
+    // changes: adding a block or arming a curve happens elsewhere entirely. Without this the
+    // cell only re-filled when something *else* forced a repaint -- a scene change, a mouse
+    // move over the strip -- which is why a newly filled scene could sit uncoloured for tens
+    // of seconds. Re-deriving it here costs one pass over the visible cells at 30Hz.
+    if (const auto occupancy = currentOccupancy(); occupancy != lastOccupancy)
+    {
+        lastOccupancy = occupancy;
+        repaint();
+    }
+}
+
+juce::uint64 SceneBrowser::currentOccupancy() const
+{
+    // One bit per visible cell. Cheaper than repainting unconditionally, and it means a change
+    // anywhere in the strip is caught without caring which scene it was.
+    juce::uint64 bits = 0;
+    for (int i = 0; i < visibleScenes && i < 64; ++i)
+        if (sceneHasContent (firstVisibleScene + i))
+            bits |= (juce::uint64) 1 << i;
+    return bits;
 }
 
 void SceneBrowser::resized() {}

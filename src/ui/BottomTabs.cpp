@@ -1,18 +1,36 @@
 #include "BottomTabs.h"
 #include "BlockGrid.h"
 #include "../PluginProcessor.h"
+#include "../dsp/ParamIndex.h"
 
 namespace stutter::ui
 {
 
+namespace
+{
+/** One accent per shaping curve, used for both its editor (ON button, plotted line) and its
+    tab lamp. Named here rather than written at each use so the strip and the panel cannot end
+    up disagreeing about what colour a given curve is. */
+inline juce::Colour volumeAccent() { return Palette::accent; }
+inline juce::Colour filterAccent() { return Palette::laneColour (6); }
+inline juce::Colour panAccent()    { return Palette::laneColour (3); }
+}
+
 BottomTabs::BottomTabs (StutterAudioProcessor& processor)
     : proc (processor),
       laneParamPanel (processor),
-      volumeCurveEditor (processor, stutter::ModTarget::Volume, Palette::accent),
-      filterCurveEditor (processor, stutter::ModTarget::Filter, Palette::laneColours[6]),
-      panCurveEditor (processor, stutter::ModTarget::Pan, Palette::laneColours[3]),
+      volumeCurveEditor (processor, stutter::ModTarget::Volume, volumeAccent()),
+      filterCurveEditor (processor, stutter::ModTarget::Filter, filterAccent()),
+      panCurveEditor (processor, stutter::ModTarget::Pan, panAccent()),
       modRoutePanel (processor, processor.getSceneDocument())
 {
+    volumeTabButton.setLampColour (volumeAccent());
+    filterTabButton.setLampColour (filterAccent());
+    panTabButton.setLampColour (panAccent());
+    // MOD has no curve of its own; the neutral accent keeps it from impersonating one of the
+    // three shapers.
+    modTabButton.setLampColour (Palette::accent);
+
     auto setupTab = [this] (juce::TextButton& b, Tab t)
     {
         b.setClickingTogglesState (false);
@@ -48,31 +66,52 @@ void BottomTabs::timerCallback()
 
 void BottomTabs::refreshCurveTabIndicators()
 {
-    struct Entry { ModTarget target; const char* name; CurveTabButton* button; };
+    struct Entry { ModTarget target; CurveTabButton* button; };
     const Entry entries[] = {
-        { ModTarget::Volume, ID::curveNameVolume.toRawUTF8(), &volumeTabButton },
-        { ModTarget::Filter, ID::curveNameFilter.toRawUTF8(), &filterTabButton },
-        { ModTarget::Pan,    ID::curveNamePan.toRawUTF8(),    &panTabButton },
+        { ModTarget::Volume, &volumeTabButton },
+        { ModTarget::Filter, &filterTabButton },
+        { ModTarget::Pan,    &panTabButton },
     };
 
+    // The lamp mirrors the tab's own ON switch, nothing else.
+    //
+    // It used to light on "the shape departs from neutral somewhere" instead, which is a
+    // different proposition and disagreed with the switch in both directions: Init has all
+    // three curves ON but flat, so no lamp lit even though every switch said ON, and a curve
+    // switched OFF with a shape still drawn in it lit a lamp while contributing nothing. The
+    // ON switch is the thing the user set and the thing the audio path actually tests
+    // (applyGlobalModulators short-circuits on isEnabled), so it is what the lamp reports.
     for (const auto& e : entries)
+        e.button->setLampOn (proc.getCurve (e.target).isEnabled());
+
+    // MOD earns a lamp on the same terms: at least one route in this scene is enabled and
+    // pointed somewhere. Without it the only way to know a scene carries modulation was to
+    // open the tab, so a patch could be audibly modulated with nothing on screen saying so.
+    modTabButton.setLampOn (countActiveModRoutes() > 0);
+}
+
+int BottomTabs::countActiveModRoutes() const
+{
+    // Read-only throughout: this runs eight times a second off a timer, and ensureScene()
+    // here would materialise a scene for every slot the user merely visits -- the same
+    // mistake documented on SceneDocument::findScene.
+    const auto scene = proc.getSceneDocument().findScene (modScene);
+    if (! scene.isValid())
+        return 0;
+
+    const auto curves = scene.getChildWithName (SceneIDs::curvesNode);
+    if (! curves.isValid())
+        return 0;
+
+    int active = 0;
+    for (int i = 0; i < curves.getNumChildren(); ++i)
     {
-        const auto& curve = proc.getCurve (e.target);
-        const float neutral = ID::neutralValueForCurve (e.name);
-
-        // "Doing something" means the shape departs from its own neutral value somewhere.
-        // Sampling a handful of phases is enough to catch any curve a person would draw, and
-        // avoids walking the whole baked table eight times a second.
-        bool active = false;
-        for (int i = 0; i < 16 && ! active; ++i)
-            active = std::abs (curve.getValueAtPhase ((float) i / 16.0f) - neutral) > 1.0e-3f;
-
-        // Recorded for paint() to draw a lamp beside the label. Tinting the tab was tried
-        // first and read as a second, dimmer version of "selected" -- two states drawn in the
-        // same visual language, distinguishable only by shade. A lamp says something else
-        // entirely, and matches the dots already used beside the lane names.
-        e.button->setLampOn (active);
+        const auto c = curves.getChild (i);
+        if ((bool) c.getProperty (SceneIDs::enabled, false)
+            && isValidParamIndex ((int) c.getProperty (SceneIDs::target, -1)))
+            ++active;
     }
+    return active;
 }
 
 void BottomTabs::updateLaneTabLabel()
@@ -94,7 +133,9 @@ void BottomTabs::setSelectedLane (int laneIndex)
 
 void BottomTabs::setSceneIndex (int sceneIndex)
 {
+    modScene = sceneIndex;
     modRoutePanel.setSceneIndex (sceneIndex);
+    refreshCurveTabIndicators(); // the MOD lamp is per-scene, so it has to follow immediately
 }
 
 void BottomTabs::refreshAfterPresetLoad()
