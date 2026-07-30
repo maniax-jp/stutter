@@ -2286,3 +2286,115 @@ TEST_CASE ("Republishing the bank mid-playback does not re-trigger a lane", "[pr
     INFO ("tail maxDiff after a mid-playback republish: " << maxDiff);
     CHECK (maxDiff < 1.0e-6);
 }
+
+// Slow (~10s: 28 presets x 2 renders), so it is tagged [.slow] and excluded from the default
+// run. CI passes [.slow] explicitly; run it locally with `stutter_tests "[republish]"` after
+// touching anything the audio thread carries across a block boundary.
+TEST_CASE ("No preset changes sound when the bank is republished mid-playback",
+           "[processor][sequencer][republish][.slow]")
+{
+    // Tracking the playing block by pointer was one instance of a class: audio-thread state
+    // that survives a bank republish and silently means something different afterwards. The
+    // reported symptom was one preset and one click, but the exposure is every preset and
+    // every republish -- and the editor republishes on any mouse-up in the grid, on a knob
+    // release, and on a grid-geometry change.
+    //
+    // So this sweeps all of them, republishes repeatedly at irregular offsets (so the swap
+    // lands at many different points within a block and within a division), and drives both
+    // entry points: the bare publish and the knob-release flush. Nothing about a republish
+    // should be audible.
+    StutterAudioProcessor probe;
+    probe.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+    stutter::PresetManager probeList (probe);
+
+    std::vector<juce::String> names;
+    for (const auto& e : probeList.getPresets())
+        if (e.isFactory && e.sceneBankIndex < 0 && e.name != "Init")
+            names.push_back (e.name);
+    REQUIRE (names.size() > 20);
+
+    auto render = [] (const juce::String& wanted, bool republishMidway)
+    {
+        StutterAudioProcessor proc;
+        proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        stutter::PresetManager pm (proc);
+
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == wanted)
+                idx = i;
+
+        constexpr int totalBlocks = 200;
+        juce::AudioBuffer<float> out (2, stutter::test::blockSize * totalBlocks);
+        out.clear();
+
+        for (int b = 0; b < totalBlocks; ++b)
+        {
+            if (b == 40) { pm.loadPreset (idx); proc.pumpSceneMirror(); }
+            // Repeatedly, and at irregular offsets, so a republish lands at many different
+            // points within a block and within a division rather than always the same one.
+            // A knob release reaches the same republish through flushPendingLaneParamWrites,
+            // so alternate between the two entry points rather than only exercising one.
+            if (republishMidway && b > 100 && (b % 7) == 0)
+            {
+                if ((b % 14) == 0)
+                {
+                    // The knob-edit path: a gestured write, flushed and republished.
+                    const auto id = ID::lanePrefix (StutterAudioProcessor::laneFilter)
+                                      + ID::filterResonance;
+                    if (auto* param = proc.getAPVTS().getParameter (id))
+                    {
+                        const auto& range = proc.getAPVTS().getParameterRange (id);
+                        const float held = range.convertFrom0to1 (param->getValue());
+                        param->beginChangeGesture();
+                        param->setValueNotifyingHost (range.convertTo0to1 (held)); // same value
+                        param->endChangeGesture();
+                    }
+                }
+                else
+                {
+                    proc.getSceneDocument().publish();
+                }
+                proc.pumpSceneMirror();
+            }
+
+            juce::AudioBuffer<float> blk (2, stutter::test::blockSize);
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < stutter::test::blockSize; ++i)
+                {
+                    const double t = (double) (b * stutter::test::blockSize + i)
+                                       / stutter::test::sampleRate;
+                    double v = 0.0;
+                    for (int h = 1; h <= 12; ++h)
+                        v += std::sin (2.0 * juce::MathConstants<double>::pi * 110.0 * h * t) / h;
+                    blk.setSample (c, i, (float) (0.25 * v));
+                }
+            juce::MidiBuffer midi;
+            proc.processBlock (blk, midi);
+            for (int c = 0; c < 2; ++c)
+                out.copyFrom (c, b * stutter::test::blockSize, blk, c, 0, stutter::test::blockSize);
+        }
+        return out;
+    };
+
+    std::vector<juce::String> diverged;
+    for (const auto& n : names)
+    {
+        const auto a = render (n, false);
+        const auto b = render (n, true);
+        const int from = stutter::test::blockSize * 140;
+        double maxDiff = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = from; i < a.getNumSamples(); ++i)
+                maxDiff = juce::jmax (maxDiff, std::abs ((double) a.getSample (c, i)
+                                                         - (double) b.getSample (c, i)));
+        if (maxDiff > 1.0e-6)
+            diverged.push_back (n + " (" + juce::String (maxDiff, 6) + ")");
+    }
+
+    juce::String report;
+    for (auto& d : diverged) report << d << ", ";
+    INFO ("presets whose sound changed on republish: " << report);
+    CHECK (diverged.empty());
+}

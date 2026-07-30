@@ -47,3 +47,8 @@ target_link_libraries(stutter_tests
 # the binary at build time to enumerate cases, which doubles the cost of every build for no
 # benefit here -- the suites are fast and a failure names its own case anyway.
 add_test(NAME stutter_tests COMMAND stutter_tests)
+
+# Catch2 hides [.slow] cases from a bare run, so they need their own entry or they would be
+# registered and never actually execute -- protection that only appears to exist. Kept separate
+# rather than folded into the line above so the fast suite stays the one you run while editing.
+add_test(NAME stutter_tests_slow COMMAND stutter_tests "[.slow]")
