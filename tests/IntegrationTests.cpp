@@ -4,6 +4,7 @@
 #include "TestHelpers.h"
 #include <thread>
 #include <set>
+#include <map>
 #include "PresetManager.h"
 #include "FactoryScenes.h"
 #include "ui/SceneBrowser.h"
@@ -1117,6 +1118,41 @@ TEST_CASE ("Reading the document never creates scenes", "[document][presets]")
 
         proc.editorBeingDeleted (editor.get());
     }
+
+    SECTION ("painting a loaded preset does not add scenes either")
+    {
+        // The Init case above misses most of the read paths: with no lane state to draw, the
+        // grid never asks for a mute flag or a grid geometry, and those accessors reached for
+        // ensureScene too. A real preset exercises them.
+        auto& pm = proc.getPresetManager();
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == "Trance Gate 16th")
+                idx = i;
+        REQUIRE (idx >= 0);
+        pm.loadPreset (idx);
+
+        std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditorIfNeeded());
+        REQUIRE (editor != nullptr);
+        editor->setSize (1200, 800);
+
+        juce::Image img (juce::Image::ARGB, editor->getWidth(), editor->getHeight(), true);
+        { juce::Graphics g (img); editor->paintEntireComponent (g, true); }
+
+        const int beforePaint = doc.getState().getNumChildren();
+
+        for (int frame = 0; frame < 5; ++frame)
+        {
+            juce::Graphics g (img);
+            editor->paintEntireComponent (g, true);
+        }
+
+        INFO ("scene nodes after the first paint " << beforePaint
+              << ", after five more " << doc.getState().getNumChildren());
+        CHECK (doc.getState().getNumChildren() == beforePaint);
+
+        proc.editorBeingDeleted (editor.get());
+    }
 }
 
 TEST_CASE ("The playhead keeps moving when there is no scene to render", "[processor][ui]")
@@ -1252,6 +1288,57 @@ TEST_CASE ("A swept filter stays bounded", "[presets][audio][modulation]")
 }
 
 
+
+
+
+
+TEST_CASE ("A loaded preset stays clean while the editor runs", "[presets][ui]")
+{
+    // The mirror writes the scene's values into APVTS, and APVTS reflects a parameter change
+    // into its ValueTree asynchronously -- so the property callback arrives after the mirror's
+    // suppression scope has closed. The synchronous flag could not catch it, and the timer tick
+    // that ran the mirror marked a freshly loaded preset as edited a moment later.
+    //
+    // Needs the editor and its timers: without them the mirror never runs on the path that
+    // exposed this, which is why it went unnoticed headlessly.
+    for (const char* name : { "Held Envelopes", "Routed Modulation" })
+    {
+        INFO (name);
+
+        StutterAudioProcessor proc;
+        proc.setPlayConfigDetails (2, 2, stutter::test::sampleRate, stutter::test::blockSize);
+        proc.prepareToPlay (stutter::test::sampleRate, stutter::test::blockSize);
+        auto& pm = proc.getPresetManager();
+
+        int idx = -1;
+        for (int i = 0; i < (int) pm.getPresets().size(); ++i)
+            if (pm.getPresets()[(size_t) i].name == juce::String (name))
+                idx = i;
+        REQUIRE (idx >= 0);
+
+        std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditorIfNeeded());
+        REQUIRE (editor != nullptr);
+        editor->setSize (1200, 800);
+        juce::Image img (juce::Image::ARGB, 1200, 800, true);
+
+        pm.loadPreset (idx);
+        REQUIRE_FALSE (pm.isDirty());
+
+        for (int tick = 0; tick < 30; ++tick)
+        {
+            juce::Timer::callPendingTimersSynchronously();
+            { juce::Graphics g (img); editor->paintEntireComponent (g, true); }
+
+            juce::AudioBuffer<float> block (2, stutter::test::blockSize);
+            block.clear();
+            juce::MidiBuffer midi;
+            proc.processBlock (block, midi);
+        }
+
+        CHECK_FALSE (pm.isDirty());
+        proc.editorBeingDeleted (editor.get());
+    }
+}
 
 TEST_CASE ("A freshly loaded preset is not marked dirty", "[presets][ui]")
 {

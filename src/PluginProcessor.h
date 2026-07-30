@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include <map>
 
 #include "dsp/CaptureBuffer.h"
 #include "dsp/CurveModulator.h"
@@ -180,6 +181,22 @@ public:
         patch been modified?" has to skip those, or simply loading a preset marks it dirty. */
     bool isWritingParametersInternally() const noexcept { return suppressParamWriteback; }
 
+    /**
+        True when `id` currently holds exactly the value the plugin last wrote to it itself.
+
+        The synchronous flag above is not enough on its own. APVTS reflects a parameter change
+        into its ValueTree asynchronously, so the property callback arrives after the mirror's
+        scope has closed and the flag has already gone back down -- which is how loading a
+        preset ended up marking itself as edited. Comparing against what was written closes
+        that gap: a genuine edit moves the value somewhere else, and only an echo matches.
+    */
+    bool isEchoOfInternalWrite (const juce::String& id, float value) const
+    {
+        const auto it = lastInternalWrites.find (id);
+        return it != lastInternalWrites.end()
+               && std::abs (it->second - value) <= 1.0e-6f;
+    }
+
     /** Current division for the block grid's playhead, or -1 when idle. */
     int getBlockPlayheadDivision() const noexcept { return blockSequencer.getPlayheadDivision(); }
 
@@ -207,6 +224,11 @@ private:
     /** Set while mirrorActiveSceneToApvts is writing, so the parameter listener can tell a
         mirror write from a genuine user edit. Message thread only. */
     bool suppressParamWriteback = false;
+
+    /** The last value the plugin itself wrote to each parameter, keyed by ID. Read by
+        isEchoOfInternalWrite to tell the mirror's own echo from a user edit. Message thread
+        only, like everything else on the mirror path. */
+    std::map<juce::String, float> lastInternalWrites;
 
     /** Which scene APVTS currently reflects; -1 before the first mirror. */
     int mirroredScene = -1;

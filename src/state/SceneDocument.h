@@ -207,15 +207,19 @@ public:
 
     // ---- Scene geometry ------------------------------------------------------------------
 
-    int getBeats (int sceneIndex)
+    // Read-only, and deliberately so: these are called from paint() by way of
+    // totalDivisions(), so reaching for ensureScene here would materialise a scene for every
+    // slot the grid happens to draw. An absent scene reports the defaults, which is what an
+    // empty slot would have been created with anyway.
+    int getBeats (int sceneIndex) const
     {
-        auto s = ensureScene (sceneIndex);
+        auto s = findScene (sceneIndex);
         return s.isValid() ? juce::jlimit (1, 8, (int) s.getProperty (SceneIDs::beats, 4)) : 4;
     }
 
-    int getDivisions (int sceneIndex)
+    int getDivisions (int sceneIndex) const
     {
-        auto s = ensureScene (sceneIndex);
+        auto s = findScene (sceneIndex);
         return s.isValid() ? juce::jlimit (2, 8, (int) s.getProperty (SceneIDs::divisions, 4)) : 4;
     }
 
@@ -240,7 +244,7 @@ public:
             s.setProperty (SceneIDs::swing, juce::jlimit (-1.0f, 1.0f, swing), &undoManager);
     }
 
-    int totalDivisions (int sceneIndex)
+    int totalDivisions (int sceneIndex) const
     {
         return getBeats (sceneIndex) * getDivisions (sceneIndex);
     }
@@ -263,10 +267,13 @@ public:
 
 private:
     /** The scene's <Lane> node for `lane`, created if absent. Shared by the flag accessors so
-        they agree with mirrorActiveSceneToApvts about where lane state lives. */
+        they agree with mirrorActiveSceneToApvts about where lane state lives.
+
+        createIfMissing governs the scene as well as the lane: a reader must not conjure either,
+        since the flag accessors below run from paint(). */
     juce::ValueTree laneNode (int sceneIndex, int lane, bool createIfMissing)
     {
-        auto scene = ensureScene (sceneIndex);
+        auto scene = createIfMissing ? ensureScene (sceneIndex) : findScene (sceneIndex);
         if (! scene.isValid() || lane < 0 || lane >= maxLanes)
             return {};
 

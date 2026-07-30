@@ -332,11 +332,23 @@ void PresetManager::valueTreePropertyChanged (juce::ValueTree& tree, const juce:
     if (applyingPreset || proc.isWritingParametersInternally())
         return;
 
-    // The performance parameters are not part of a preset, so moving them cannot make one
-    // modified. Without this, merely toggling ACTIVE -- or letting the host's automation move
-    // the scene -- put a "*" next to a preset the user had not touched.
-    if (tree.hasType ("PARAM") && isPerformanceParam (tree.getProperty ("id").toString()))
-        return;
+    if (tree.hasType ("PARAM"))
+    {
+        const auto id = tree.getProperty ("id").toString();
+
+        // The performance parameters are not part of a preset, so moving them cannot make one
+        // modified. Without this, merely toggling ACTIVE -- or letting the host's automation
+        // move the scene -- put a "*" next to a preset the user had not touched.
+        if (isPerformanceParam (id))
+            return;
+
+        // Nor can the plugin's own mirror. APVTS reflects a parameter change into its tree
+        // asynchronously, so this callback arrives after the mirror's suppression scope has
+        // closed -- the flag alone cannot catch it, and loading a preset marked itself as
+        // edited. An echo carries exactly the value that was written; an edit does not.
+        if (proc.isEchoOfInternalWrite (id, (float) tree.getProperty ("value")))
+            return;
+    }
 
     dirty = true;
 }

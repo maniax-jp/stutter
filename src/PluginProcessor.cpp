@@ -822,9 +822,16 @@ void StutterAudioProcessor::mirrorActiveSceneToApvts()
                         value = (float) pt.getProperty (stutter::SceneIDs::value, value);
                 }
 
-            if (auto* param = apvts.getParameter (ID::lanePrefix (lane) + set[p].id))
+            const auto paramId = ID::lanePrefix (lane) + set[p].id;
+            if (auto* param = apvts.getParameter (paramId))
             {
-                const auto& range = apvts.getParameterRange (ID::lanePrefix (lane) + set[p].id);
+                // Remember what we wrote. APVTS reflects the change into its ValueTree
+                // asynchronously, so the property callback lands after this function's
+                // suppression scope has already closed -- and a preset load would then read
+                // as a user edit. The dirty check compares against this to spot the echo.
+                lastInternalWrites[paramId] = value;
+
+                const auto& range = apvts.getParameterRange (paramId);
                 param->setValueNotifyingHost (range.convertTo0to1 (value));
             }
         }
